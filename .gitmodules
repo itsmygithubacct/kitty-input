@@ -1,0 +1,3 @@
+[submodule "third_party/kitty_keyboard"]
+	path = third_party/kitty_keyboard
+	url = https://github.com/itsmygithubacct/kitty-keyboard.git
