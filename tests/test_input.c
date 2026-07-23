@@ -321,6 +321,37 @@ static bool test_posix_lifecycle(void)
     CHECK(contains_bytes(controls, (size_t)control_count, "\x1b[?1003l"));
     CHECK(contains_bytes(controls, (size_t)control_count, "\x1b[<u"));
     CHECK(!terminal.active);
+
+    /* An emergency restore emits the selected controls once.  Normal stop
+     * still completes cleanup, and the same object can be started again. */
+    CHECK(kittyin_terminal_start(&terminal, slave, slave, &options) == 0);
+    (void)read_available(master, controls, sizeof controls);
+    kittyin_terminal_emergency_restore(&terminal);
+    control_count = read_available(master, controls, sizeof controls);
+    CHECK(control_count > 0);
+    CHECK(contains_bytes(controls, (size_t)control_count, "\x1b[?2004l"));
+    CHECK(contains_bytes(controls, (size_t)control_count, "\x1b[?1003l"));
+    CHECK(contains_bytes(controls, (size_t)control_count, "\x1b[<u"));
+    CHECK(kittyin_terminal_stop(&terminal) == 0);
+    CHECK(read_available(master, controls, sizeof controls) == 0);
+
+    /* Modes left off by the caller must not be disabled on shutdown. */
+    options.mouse_tracking = KITTYIN_MOUSE_TRACKING_OFF;
+    options.focus_events = false;
+    options.bracketed_paste = false;
+    CHECK(kittyin_terminal_start(&terminal, slave, slave, &options) == 0);
+    (void)read_available(master, controls, sizeof controls);
+    CHECK(kittyin_terminal_stop(&terminal) == 0);
+    control_count = read_available(master, controls, sizeof controls);
+    CHECK(control_count > 0);
+    CHECK(contains_bytes(controls, (size_t)control_count, "\x1b[<u"));
+    CHECK(!contains_bytes(controls, (size_t)control_count, "\x1b[?2004l"));
+    CHECK(!contains_bytes(controls, (size_t)control_count, "\x1b[?1004l"));
+    CHECK(!contains_bytes(controls, (size_t)control_count, "\x1b[?1016l"));
+    CHECK(!contains_bytes(controls, (size_t)control_count, "\x1b[?1006l"));
+    CHECK(!contains_bytes(controls, (size_t)control_count, "\x1b[?1000l"));
+    CHECK(!contains_bytes(controls, (size_t)control_count, "\x1b[?1002l"));
+    CHECK(!contains_bytes(controls, (size_t)control_count, "\x1b[?1003l"));
     CHECK(close(master) == 0);
     CHECK(close(slave) == 0);
     return true;

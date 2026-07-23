@@ -53,6 +53,38 @@ static int write_literal(int fd, const char *control)
     return write_all(fd, control, strlen(control));
 }
 
+static bool append_control(kittyin_terminal *terminal, const char *control)
+{
+    const size_t length = strlen(control);
+
+    if (length > sizeof terminal->mode_restore - terminal->mode_restore_length)
+        return false;
+    (void)memcpy(terminal->mode_restore + terminal->mode_restore_length,
+                 control, length);
+    terminal->mode_restore_length += length;
+    return true;
+}
+
+static bool build_mode_restore(kittyin_terminal *terminal)
+{
+    terminal->mode_restore_length = 0u;
+    if (terminal->bracketed_paste &&
+        !append_control(terminal, "\x1b[?2004l")) return false;
+    if (terminal->focus_events &&
+        !append_control(terminal, "\x1b[?1004l")) return false;
+    if (terminal->mouse_tracking != KITTYIN_MOUSE_TRACKING_OFF) {
+        if (terminal->pixel_mouse &&
+            !append_control(terminal, "\x1b[?1016l")) return false;
+        if (!append_control(terminal, "\x1b[?1006l")) return false;
+        if (terminal->mouse_tracking == KITTYIN_MOUSE_TRACKING_BUTTON)
+            return append_control(terminal, "\x1b[?1000l");
+        if (terminal->mouse_tracking == KITTYIN_MOUSE_TRACKING_DRAG)
+            return append_control(terminal, "\x1b[?1002l");
+        return append_control(terminal, "\x1b[?1003l");
+    }
+    return true;
+}
+
 static int enable_modes(kittyin_terminal *terminal)
 {
     const int fd = terminal->keyboard.output_fd;
@@ -81,16 +113,21 @@ static int enable_modes(kittyin_terminal *terminal)
 
 static int disable_modes(kittyin_terminal *terminal)
 {
-    static const char controls[] =
-        "\x1b[?2004l\x1b[?1004l\x1b[?1016l\x1b[?1006l"
-        "\x1b[?1003l\x1b[?1002l\x1b[?1000l";
     int result = 0;
 
-    if (terminal->keyboard.output_fd >= 0)
-        result = write_all(terminal->keyboard.output_fd, controls,
-                           sizeof controls - 1u);
+    if (terminal->keyboard.output_fd >= 0 &&
+        terminal->mode_restore_length > 0u)
+        result = write_all(terminal->keyboard.output_fd,
+                           terminal->mode_restore,
+                           terminal->mode_restore_length);
     terminal->modes_enabled = false;
     return result;
+}
+
+static bool claim_restore(const kittyin_terminal *terminal)
+{
+    return !__sync_lock_test_and_set(
+        (volatile sig_atomic_t *)&terminal->restore_claimed, 1);
 }
 
 void kittyin_terminal_options_init(kittyin_terminal_options *options)
@@ -153,6 +190,13 @@ int kittyin_terminal_start(kittyin_terminal *terminal, int input_fd,
     terminal->pixel_mouse = selected->pixel_mouse;
     terminal->focus_events = selected->focus_events;
     terminal->bracketed_paste = selected->bracketed_paste;
+    terminal->restore_claimed = 0;
+    if (!build_mode_restore(terminal)) {
+        failure = EOVERFLOW;
+        (void)kittykb_terminal_stop(&terminal->keyboard);
+        errno = failure;
+        return -1;
+    }
     terminal->active = true;
     if (enable_modes(terminal) == 0) return 0;
 
@@ -226,13 +270,23 @@ int kittyin_terminal_read(kittyin_terminal *terminal)
 int kittyin_terminal_stop(kittyin_terminal *terminal)
 {
     int first_error = 0;
+    bool restore_output;
 
     if (terminal == NULL) {
         errno = EINVAL;
         return -1;
     }
     if (!terminal->active) return 0;
-    if (disable_modes(terminal) != 0) first_error = errno;
+    restore_output = claim_restore(terminal);
+    if (restore_output) {
+        if (disable_modes(terminal) != 0) first_error = errno;
+    } else {
+        /* The emergency path already emitted both restore controls.  Suppress
+         * a second keyboard-stack pop while retaining normal fd/termios
+         * cleanup in kittykb_terminal_stop(). */
+        terminal->modes_enabled = false;
+        terminal->keyboard.keyboard_mode_pushed = false;
+    }
     if (kittykb_terminal_stop(&terminal->keyboard) != 0 && first_error == 0)
         first_error = errno;
     kittyin_input_release_all(&terminal->input);
@@ -247,12 +301,16 @@ int kittyin_terminal_stop(kittyin_terminal *terminal)
 
 void kittyin_terminal_emergency_restore(const kittyin_terminal *terminal)
 {
-    static const char controls[] =
-        "\x1b[?2004l\x1b[?1004l\x1b[?1016l\x1b[?1006l"
-        "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[<u";
+    static const char keyboard_pop[] = "\x1b[<u";
 
     if (terminal != NULL && terminal->active &&
-        terminal->keyboard.output_fd >= 0)
-        (void)write(terminal->keyboard.output_fd, controls,
-                    sizeof controls - 1u);
+        terminal->keyboard.output_fd >= 0 && claim_restore(terminal)) {
+        if (terminal->mode_restore_length > 0u)
+            (void)write(terminal->keyboard.output_fd,
+                        terminal->mode_restore,
+                        terminal->mode_restore_length);
+        if (terminal->keyboard.keyboard_mode_pushed)
+            (void)write(terminal->keyboard.output_fd, keyboard_pop,
+                        sizeof keyboard_pop - 1u);
+    }
 }

@@ -5,6 +5,8 @@
 #include "kitty_keyboard_posix.h"
 
 #include <stdbool.h>
+#include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -38,6 +40,9 @@ typedef struct kittyin_terminal {
     bool bracketed_paste;
     bool modes_enabled;
     bool active;
+    volatile sig_atomic_t restore_claimed;
+    char mode_restore[64];
+    size_t mode_restore_length;
 } kittyin_terminal;
 
 void kittyin_terminal_options_init(kittyin_terminal_options *options);
@@ -49,7 +54,8 @@ int kittyin_terminal_start(kittyin_terminal *terminal, int input_fd,
 int kittyin_terminal_read(kittyin_terminal *terminal);
 int kittyin_terminal_stop(kittyin_terminal *terminal);
 
-/* Async-signal-safe best effort: disables input modes and pops keyboard mode. */
+/* Async-signal-safe best effort: restores only modes selected at start and
+ * pops keyboard mode.  A later stop still restores descriptor/termios state. */
 void kittyin_terminal_emergency_restore(const kittyin_terminal *terminal);
 
 #ifdef __cplusplus

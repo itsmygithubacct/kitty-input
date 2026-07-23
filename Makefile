@@ -15,6 +15,7 @@ WARNINGS := \
 	-Wstrict-prototypes -Wmissing-prototypes -Wformat=2
 CFLAGS ?= -O2 -g
 override CFLAGS += -std=c11 -fPIC $(WARNINGS)
+DEPFLAGS := -MMD -MP
 
 LIB_OBJS := \
 	$(BUILD_DIR)/kitty_input.o \
@@ -25,6 +26,7 @@ STATIC_LIB := $(BUILD_DIR)/lib$(PROJECT).a
 SHARED_LIB := $(BUILD_DIR)/lib$(PROJECT).so
 TEST_BIN := $(BUILD_DIR)/test-input
 EXAMPLE_BIN := $(BUILD_DIR)/events
+DEPS := $(LIB_OBJS:.o=.d)
 
 .PHONY: all clean install sanitize test
 
@@ -34,16 +36,16 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 $(BUILD_DIR)/kitty_input.o: src/kitty_input.c include/kitty_input.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/kitty_input_posix.o: src/kitty_input_posix.c include/kitty_input.h include/kitty_input_posix.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/kitty_keyboard.o: $(KITTY_KEYBOARD_DIR)/src/kitty_keyboard.c $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/kitty_keyboard_posix.o: $(KITTY_KEYBOARD_DIR)/src/kitty_keyboard_posix.c $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_posix.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(STATIC_LIB): $(LIB_OBJS)
 	$(AR) rcs $@ $^
@@ -80,3 +82,5 @@ install: all
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+-include $(DEPS)
