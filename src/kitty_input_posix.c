@@ -4,9 +4,15 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef __linux__
+#include <linux/joystick.h>
+#endif
 
 static int64_t monotonic_milliseconds(void)
 {
@@ -313,4 +319,237 @@ void kittyin_terminal_emergency_restore(const kittyin_terminal *terminal)
             (void)write(terminal->keyboard.output_fd, keyboard_pop,
                         sizeof keyboard_pop - 1u);
     }
+}
+
+static void emit_gamepad_event(kittyin_gamepads *gamepads,
+                               const kittyin_gamepad_event *event)
+{
+    size_t tail;
+
+    if (gamepads == NULL || event == NULL) return;
+    if (gamepads->event_count >=
+        KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY) {
+        ++gamepads->dropped_events;
+        return;
+    }
+    tail = (gamepads->event_head + gamepads->event_count) %
+           KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY;
+    gamepads->events[tail] = *event;
+    ++gamepads->event_count;
+}
+
+void kittyin_gamepads_init(kittyin_gamepads *gamepads)
+{
+    uint8_t index;
+
+    if (gamepads == NULL) return;
+    (void)memset(gamepads, 0, sizeof *gamepads);
+    for (index = 0u; index < KITTYIN_GAMEPAD_CAPACITY; ++index)
+        gamepads->devices[index].fd = -1;
+    (void)snprintf(gamepads->directory, sizeof gamepads->directory,
+                   "%s", "/dev/input");
+    gamepads->scan_interval_ms = 500u;
+}
+
+bool kittyin_gamepads_set_directory(kittyin_gamepads *gamepads,
+                                    const char *directory)
+{
+    const size_t length = directory != NULL ? strlen(directory) : 0u;
+
+    if (gamepads == NULL || length == 0u ||
+        length >= sizeof gamepads->directory) return false;
+    (void)memcpy(gamepads->directory, directory, length + 1u);
+    gamepads->next_scan_ms = 0;
+    return true;
+}
+
+bool kittyin_gamepads_set_scan_interval(kittyin_gamepads *gamepads,
+                                        uint32_t interval_ms)
+{
+    if (gamepads == NULL || interval_ms < 10u ||
+        interval_ms > 60000u) return false;
+    gamepads->scan_interval_ms = interval_ms;
+    return true;
+}
+
+bool kittyin_gamepads_attach_fd(kittyin_gamepads *gamepads, uint8_t gamepad,
+                                int fd, const char *name, uint8_t axes,
+                                uint8_t buttons)
+{
+    kittyin_gamepad_device *device;
+    int flags;
+    int descriptor_flags;
+
+    if (gamepads == NULL || gamepad >= KITTYIN_GAMEPAD_CAPACITY ||
+        fd < 0) {
+        errno = EINVAL;
+        return false;
+    }
+    device = &gamepads->devices[gamepad];
+    if (device->connected) {
+        errno = EBUSY;
+        return false;
+    }
+    flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)
+        return false;
+    descriptor_flags = fcntl(fd, F_GETFD);
+    if (descriptor_flags >= 0)
+        (void)fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC);
+    device->fd = fd;
+    device->axes = axes;
+    device->buttons = buttons;
+    device->connected = true;
+    (void)snprintf(device->name, sizeof device->name, "%s",
+                   name != NULL && name[0] != '\0' ?
+                   name : "Linux joystick");
+    emit_gamepad_event(
+        gamepads,
+        &(kittyin_gamepad_event){
+            KITTYIN_GAMEPAD_CONNECTED, gamepad, 0u, 0, false
+        });
+    return true;
+}
+
+void kittyin_gamepads_detach(kittyin_gamepads *gamepads, uint8_t gamepad)
+{
+    kittyin_gamepad_device *device;
+
+    if (gamepads == NULL || gamepad >= KITTYIN_GAMEPAD_CAPACITY)
+        return;
+    device = &gamepads->devices[gamepad];
+    if (!device->connected) return;
+    if (device->fd >= 0) (void)close(device->fd);
+    *device = (kittyin_gamepad_device){.fd = -1};
+    emit_gamepad_event(
+        gamepads,
+        &(kittyin_gamepad_event){
+            KITTYIN_GAMEPAD_DISCONNECTED, gamepad, 0u, 0, false
+        });
+}
+
+#ifdef __linux__
+static void scan_gamepads(kittyin_gamepads *gamepads)
+{
+    uint8_t gamepad;
+
+    for (gamepad = 0u; gamepad < KITTYIN_GAMEPAD_CAPACITY; ++gamepad) {
+        kittyin_gamepad_device *device = &gamepads->devices[gamepad];
+        char path[KITTYIN_GAMEPAD_PATH_CAPACITY];
+        char name[KITTYIN_GAMEPAD_NAME_CAPACITY] = {0};
+        unsigned char axes = 0u;
+        unsigned char buttons = 0u;
+        int fd;
+        int length;
+
+        if (device->connected) continue;
+        length = snprintf(path, sizeof path, "%s/js%u",
+                          gamepads->directory, (unsigned int)gamepad);
+        if (length < 0 || (size_t)length >= sizeof path) continue;
+        fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) continue;
+        if (ioctl(fd, JSIOCGAXES, &axes) != 0 ||
+            ioctl(fd, JSIOCGBUTTONS, &buttons) != 0) {
+            (void)close(fd);
+            continue;
+        }
+        if (ioctl(fd, JSIOCGNAME(sizeof name), name) < 0)
+            (void)snprintf(name, sizeof name, "%s", "Linux joystick");
+        if (!kittyin_gamepads_attach_fd(
+                gamepads, gamepad, fd, name,
+                (uint8_t)axes, (uint8_t)buttons)) {
+            (void)close(fd);
+            continue;
+        }
+        (void)snprintf(device->path, sizeof device->path, "%s", path);
+    }
+}
+
+static void read_gamepad(kittyin_gamepads *gamepads, uint8_t gamepad)
+{
+    kittyin_gamepad_device *device = &gamepads->devices[gamepad];
+
+    while (device->connected) {
+        struct js_event source;
+        ssize_t count = read(device->fd, &source, sizeof source);
+
+        if (count == (ssize_t)sizeof source) {
+            const unsigned int type =
+                (unsigned int)source.type &
+                (unsigned int)~JS_EVENT_INIT;
+            kittyin_gamepad_event event = {
+                type == JS_EVENT_BUTTON ?
+                    KITTYIN_GAMEPAD_BUTTON : KITTYIN_GAMEPAD_AXIS,
+                gamepad, source.number, source.value,
+                ((unsigned int)source.type & JS_EVENT_INIT) != 0u
+            };
+
+            if (type == JS_EVENT_BUTTON || type == JS_EVENT_AXIS)
+                emit_gamepad_event(gamepads, &event);
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            break;
+        kittyin_gamepads_detach(gamepads, gamepad);
+    }
+}
+#endif
+
+void kittyin_gamepads_poll(kittyin_gamepads *gamepads, int64_t now_ms)
+{
+    if (gamepads == NULL || now_ms < 0) return;
+    if (now_ms >= gamepads->next_scan_ms) {
+#ifdef __linux__
+        scan_gamepads(gamepads);
+#endif
+        gamepads->next_scan_ms =
+            now_ms > INT64_MAX - (int64_t)gamepads->scan_interval_ms ?
+            INT64_MAX :
+            now_ms + (int64_t)gamepads->scan_interval_ms;
+    }
+#ifdef __linux__
+    {
+        uint8_t gamepad;
+
+        for (gamepad = 0u;
+             gamepad < KITTYIN_GAMEPAD_CAPACITY; ++gamepad)
+            if (gamepads->devices[gamepad].connected)
+                read_gamepad(gamepads, gamepad);
+    }
+#endif
+}
+
+bool kittyin_gamepads_next(kittyin_gamepads *gamepads,
+                           kittyin_gamepad_event *event)
+{
+    if (gamepads == NULL || event == NULL ||
+        gamepads->event_count == 0u) return false;
+    *event = gamepads->events[gamepads->event_head];
+    gamepads->event_head =
+        (gamepads->event_head + 1u) %
+        KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY;
+    --gamepads->event_count;
+    return true;
+}
+
+void kittyin_gamepads_close(kittyin_gamepads *gamepads)
+{
+    uint8_t gamepad;
+
+    if (gamepads == NULL) return;
+    for (gamepad = 0u; gamepad < KITTYIN_GAMEPAD_CAPACITY; ++gamepad) {
+        kittyin_gamepad_device *device = &gamepads->devices[gamepad];
+
+        if (device->connected && device->fd >= 0)
+            (void)close(device->fd);
+        *device = (kittyin_gamepad_device){.fd = -1};
+    }
+    gamepads->event_head = 0u;
+    gamepads->event_count = 0u;
+}
+
+uint64_t kittyin_gamepads_dropped_events(const kittyin_gamepads *gamepads)
+{
+    return gamepads != NULL ? gamepads->dropped_events : 0u;
 }

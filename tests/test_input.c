@@ -10,6 +10,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef __linux__
+#include <linux/joystick.h>
+#endif
+
 #define CHECK(condition)                                                      \
     do {                                                                      \
         if (!(condition)) {                                                   \
@@ -241,6 +245,144 @@ static bool test_queue_overflow(void)
     return true;
 }
 
+static bool test_semantic_actions(void)
+{
+    kittyin_action_map map;
+    kittyin_action_event actions[8];
+    kittykb_event key = {0};
+    kittyin_gamepad_event gamepad = {0};
+    size_t count;
+
+    kittyin_action_map_init(&map);
+    CHECK(kittyin_action_map_bind_key(
+        &map, 1u, (uint32_t)'w', 0u));
+    CHECK(kittyin_action_map_bind_gamepad_button(
+        &map, 1u, KITTYIN_GAMEPAD_ANY, 0u));
+    CHECK(kittyin_action_map_bind_gamepad_axis(
+        &map, 2u, KITTYIN_GAMEPAD_ANY, 1u, -1));
+    CHECK(kittyin_action_map_has_binding(
+        &map, 1u, KITTYIN_DEVICE_KEYBOARD));
+    CHECK(kittyin_action_map_has_binding(
+        &map, 1u, KITTYIN_DEVICE_GAMEPAD));
+    CHECK(kittyin_action_map_set_repeat(&map, 320u, 85u));
+    CHECK(kittyin_action_map_set_dead_zone(&map, 12000));
+
+    key.key = (uint32_t)'w';
+    key.action = KITTYKB_ACTION_PRESS;
+    count = kittyin_action_map_key(&map, &key, actions, 8u);
+    CHECK(count == 1u);
+    CHECK(actions[0].action == 1u);
+    CHECK(actions[0].phase == KITTYIN_ACTION_PRESS);
+    CHECK(actions[0].device == KITTYIN_DEVICE_KEYBOARD);
+    CHECK(kittyin_action_map_active_device(&map) ==
+          KITTYIN_DEVICE_KEYBOARD);
+
+    gamepad.kind = KITTYIN_GAMEPAD_CONNECTED;
+    gamepad.gamepad = 0u;
+    CHECK(kittyin_action_map_gamepad(
+        &map, &gamepad, actions, 8u) == 0u);
+    gamepad.kind = KITTYIN_GAMEPAD_AXIS;
+    gamepad.control = 1u;
+    gamepad.value = -11999;
+    CHECK(kittyin_action_map_gamepad(
+        &map, &gamepad, actions, 8u) == 0u);
+    gamepad.value = -12000;
+    count = kittyin_action_map_gamepad(&map, &gamepad, actions, 8u);
+    CHECK(count == 1u);
+    CHECK(actions[0].action == 2u);
+    CHECK(actions[0].phase == KITTYIN_ACTION_PRESS);
+    CHECK(actions[0].device == KITTYIN_DEVICE_GAMEPAD);
+    CHECK(kittyin_action_map_active_gamepad(&map) == 0u);
+    CHECK(kittyin_action_map_advance(&map, 319u, actions, 8u) == 0u);
+    count = kittyin_action_map_advance(&map, 1u, actions, 8u);
+    CHECK(count == 1u);
+    CHECK(actions[0].phase == KITTYIN_ACTION_REPEAT);
+    count = kittyin_action_map_advance(&map, 85u, actions, 8u);
+    CHECK(count == 1u);
+    CHECK(actions[0].phase == KITTYIN_ACTION_REPEAT);
+    gamepad.value = 0;
+    count = kittyin_action_map_gamepad(&map, &gamepad, actions, 8u);
+    CHECK(count == 1u);
+    CHECK(actions[0].phase == KITTYIN_ACTION_RELEASE);
+
+    gamepad.kind = KITTYIN_GAMEPAD_BUTTON;
+    gamepad.control = 0u;
+    gamepad.value = 1;
+    count = kittyin_action_map_gamepad(&map, &gamepad, actions, 8u);
+    CHECK(count == 1u && actions[0].action == 1u);
+    gamepad.value = 0;
+    CHECK(kittyin_action_map_gamepad(
+        &map, &gamepad, actions, 8u) == 1u);
+    gamepad.kind = KITTYIN_GAMEPAD_DISCONNECTED;
+    CHECK(kittyin_action_map_gamepad(
+        &map, &gamepad, actions, 8u) == 0u);
+    CHECK(kittyin_action_map_active_device(&map) ==
+          KITTYIN_DEVICE_KEYBOARD);
+
+    CHECK(kittyin_action_map_unbind(
+        &map, 1u, KITTYIN_DEVICE_KEYBOARD) == 1u);
+    CHECK(!kittyin_action_map_has_binding(
+        &map, 1u, KITTYIN_DEVICE_KEYBOARD));
+    CHECK(kittyin_action_map_bind_key(
+        &map, 1u, (uint32_t)'k', 0u));
+    key.key = (uint32_t)'w';
+    CHECK(kittyin_action_map_key(&map, &key, actions, 8u) == 0u);
+    key.key = (uint32_t)'k';
+    CHECK(kittyin_action_map_key(&map, &key, actions, 8u) == 1u);
+    return true;
+}
+
+static bool test_gamepad_lifecycle(void)
+{
+#ifdef __linux__
+    kittyin_gamepads gamepads;
+    kittyin_gamepad_event event;
+    struct js_event source = {0};
+    int descriptors[2] = {-1, -1};
+
+    CHECK(pipe(descriptors) == 0);
+    kittyin_gamepads_init(&gamepads);
+    CHECK(kittyin_gamepads_set_directory(
+        &gamepads, "/path-that-does-not-exist"));
+    CHECK(kittyin_gamepads_set_scan_interval(&gamepads, 10u));
+    CHECK(kittyin_gamepads_attach_fd(
+        &gamepads, 0u, descriptors[0], "Test Pad", 8u, 11u));
+    descriptors[0] = -1;
+    CHECK(kittyin_gamepads_next(&gamepads, &event));
+    CHECK(event.kind == KITTYIN_GAMEPAD_CONNECTED);
+    CHECK(event.gamepad == 0u);
+
+    source.type = JS_EVENT_BUTTON;
+    source.number = 2u;
+    source.value = 1;
+    CHECK(write(descriptors[1], &source, sizeof source) ==
+          (ssize_t)sizeof source);
+    source.type = (uint8_t)(JS_EVENT_AXIS | JS_EVENT_INIT);
+    source.number = 3u;
+    source.value = -12345;
+    CHECK(write(descriptors[1], &source, sizeof source) ==
+          (ssize_t)sizeof source);
+    CHECK(close(descriptors[1]) == 0);
+    descriptors[1] = -1;
+    kittyin_gamepads_poll(&gamepads, 10);
+
+    CHECK(kittyin_gamepads_next(&gamepads, &event));
+    CHECK(event.kind == KITTYIN_GAMEPAD_BUTTON);
+    CHECK(event.control == 2u && event.value == 1);
+    CHECK(!event.initial);
+    CHECK(kittyin_gamepads_next(&gamepads, &event));
+    CHECK(event.kind == KITTYIN_GAMEPAD_AXIS);
+    CHECK(event.control == 3u && event.value == -12345);
+    CHECK(event.initial);
+    CHECK(kittyin_gamepads_next(&gamepads, &event));
+    CHECK(event.kind == KITTYIN_GAMEPAD_DISCONNECTED);
+    CHECK(!kittyin_gamepads_next(&gamepads, &event));
+    CHECK(kittyin_gamepads_dropped_events(&gamepads) == 0u);
+    kittyin_gamepads_close(&gamepads);
+#endif
+    return true;
+}
+
 static bool contains_bytes(const unsigned char *haystack, size_t haystack_size,
                            const char *needle)
 {
@@ -369,6 +511,8 @@ int main(void)
         {"filtering and recovery", test_filtering_malformed_and_recovery},
         {"held state and escape", test_held_state_escape_and_external_binding},
         {"queue overflow", test_queue_overflow},
+        {"semantic actions", test_semantic_actions},
+        {"gamepad lifecycle", test_gamepad_lifecycle},
         {"POSIX lifecycle", test_posix_lifecycle}
     };
     size_t index;

@@ -45,6 +45,30 @@ typedef struct kittyin_terminal {
     size_t mode_restore_length;
 } kittyin_terminal;
 
+#define KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY 64u
+#define KITTYIN_GAMEPAD_PATH_CAPACITY 128u
+#define KITTYIN_GAMEPAD_NAME_CAPACITY 64u
+
+typedef struct kittyin_gamepad_device {
+    int fd;
+    char path[KITTYIN_GAMEPAD_PATH_CAPACITY];
+    char name[KITTYIN_GAMEPAD_NAME_CAPACITY];
+    uint8_t axes;
+    uint8_t buttons;
+    bool connected;
+} kittyin_gamepad_device;
+
+typedef struct kittyin_gamepads {
+    kittyin_gamepad_device devices[KITTYIN_GAMEPAD_CAPACITY];
+    kittyin_gamepad_event events[KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY];
+    char directory[KITTYIN_GAMEPAD_PATH_CAPACITY];
+    size_t event_head;
+    size_t event_count;
+    uint64_t dropped_events;
+    int64_t next_scan_ms;
+    uint32_t scan_interval_ms;
+} kittyin_gamepads;
+
 void kittyin_terminal_options_init(kittyin_terminal_options *options);
 void kittyin_terminal_init(kittyin_terminal *terminal);
 
@@ -57,6 +81,26 @@ int kittyin_terminal_stop(kittyin_terminal *terminal);
 /* Async-signal-safe best effort: restores only modes selected at start and
  * pops keyboard mode.  A later stop still restores descriptor/termios state. */
 void kittyin_terminal_emergency_restore(const kittyin_terminal *terminal);
+
+/*
+ * Allocation-free Linux joystick discovery. poll() scans directory/js0..js3,
+ * reads every available event, and reports connect/disconnect transitions.
+ * Other POSIX systems retain the same API and simply discover no devices.
+ */
+void kittyin_gamepads_init(kittyin_gamepads *gamepads);
+bool kittyin_gamepads_set_directory(kittyin_gamepads *gamepads,
+                                    const char *directory);
+bool kittyin_gamepads_set_scan_interval(kittyin_gamepads *gamepads,
+                                        uint32_t interval_ms);
+bool kittyin_gamepads_attach_fd(kittyin_gamepads *gamepads, uint8_t gamepad,
+                                int fd, const char *name, uint8_t axes,
+                                uint8_t buttons);
+void kittyin_gamepads_detach(kittyin_gamepads *gamepads, uint8_t gamepad);
+void kittyin_gamepads_poll(kittyin_gamepads *gamepads, int64_t now_ms);
+bool kittyin_gamepads_next(kittyin_gamepads *gamepads,
+                           kittyin_gamepad_event *event);
+void kittyin_gamepads_close(kittyin_gamepads *gamepads);
+uint64_t kittyin_gamepads_dropped_events(const kittyin_gamepads *gamepads);
 
 #ifdef __cplusplus
 }

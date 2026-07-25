@@ -13,6 +13,17 @@ Keyboard decoding and reliable held-key state come from the pinned
 submodule. The static and shared libraries bundle both layers, so consumers
 link one library.
 
+The same allocation-free API also provides:
+
+- consumer-defined semantic actions with keyboard, gamepad-button, and
+  directional-axis bindings;
+- runtime rebinding, active-device tracking, and deterministic held-action
+  repeat;
+- configurable analog dead zones and release-safe controller state; and
+- nonblocking Linux joystick discovery for `/dev/input/js0` through `js3`,
+  including connect and disconnect events. Other POSIX targets retain the
+  portable action mapper and a no-device gamepad backend.
+
 ## Build and test
 
 ```sh
@@ -55,6 +66,43 @@ The lifecycle is intentionally explicit: start after entering the terminal
 screen that owns the modes, and stop before leaving it. Signal handlers can
 call `kittyin_terminal_emergency_restore()` for a best-effort mode reset.
 
+## Semantic actions and gamepads
+
+Applications choose their own bounded action IDs and may attach more than one
+binding to each:
+
+```c
+kittyin_action_map actions;
+kittyin_action_event mapped[8];
+kittyin_gamepads gamepads;
+kittyin_gamepad_event gamepad;
+size_t count;
+
+kittyin_action_map_init(&actions);
+kittyin_action_map_bind_key(&actions, 0, KITTYKB_KEY_ENTER, 0);
+kittyin_action_map_bind_gamepad_button(
+    &actions, 0, KITTYIN_GAMEPAD_ANY, 0);
+kittyin_action_map_bind_gamepad_axis(
+    &actions, 1, KITTYIN_GAMEPAD_ANY, 1, -1);
+
+kittyin_gamepads_init(&gamepads);
+kittyin_gamepads_poll(&gamepads, now_ms);
+while (kittyin_gamepads_next(&gamepads, &gamepad)) {
+    count = kittyin_action_map_gamepad(
+        &actions, &gamepad, mapped, 8);
+    /* Dispatch mapped[0..count). */
+}
+count = kittyin_action_map_advance(&actions, elapsed_ms, mapped, 8);
+kittyin_gamepads_close(&gamepads);
+```
+
+`now_ms` is the caller's monotonic millisecond clock and `elapsed_ms` is the
+bounded time since the previous action update.
+`KITTYIN_GAMEPAD_ANY` is intended for single-player mappings. Specific
+controller slots can be bound independently. A disconnect releases every
+action held by that device before active-device selection falls back to
+another connected controller or the keyboard.
+
 ## Guarantees
 
 - no heap allocation or global parser state
@@ -65,7 +113,7 @@ call `kittyin_terminal_emergency_restore()` for a best-effort mode reset.
 - held-key state is reported only after release-capable Kitty flags are known
 - safe reuse with an externally owned `kittykb_input`
 
-The public API is versioned as `0.1.0` through `KITTYIN_VERSION_*`.
+The public API is versioned as `0.2.0` through `KITTYIN_VERSION_*`.
 
 ## License
 

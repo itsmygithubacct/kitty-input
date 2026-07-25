@@ -470,3 +470,445 @@ const kittyin_stats *kittyin_input_get_stats(const kittyin_input *input)
 {
     return input != NULL ? &input->stats : NULL;
 }
+
+static uint32_t action_modifier_mask(void)
+{
+    return KITTYKB_MOD_SHIFT | KITTYKB_MOD_ALT | KITTYKB_MOD_CTRL |
+           KITTYKB_MOD_SUPER | KITTYKB_MOD_HYPER | KITTYKB_MOD_META;
+}
+
+static bool action_key_matches(const kittyin_action_binding *binding,
+                               const kittykb_event *key)
+{
+    uint32_t modifiers;
+
+    if (binding == NULL || key == NULL ||
+        !kittykb_event_matches_key(key, binding->key)) return false;
+    modifiers = key->modifiers & action_modifier_mask();
+    if (modifiers == binding->modifiers) return true;
+    return binding->modifiers == 0u &&
+           modifiers == KITTYKB_MOD_SHIFT &&
+           binding->key >= (uint32_t)'a' &&
+           binding->key <= (uint32_t)'z';
+}
+
+static size_t append_action_event(kittyin_action_event *events,
+                                  size_t capacity, size_t count,
+                                  uint16_t action,
+                                  kittyin_action_phase phase,
+                                  kittyin_device_kind device,
+                                  uint8_t gamepad)
+{
+    if (events != NULL && count < capacity)
+        events[count] = (kittyin_action_event){
+            action, phase, device, gamepad
+        };
+    return count < capacity ? count + 1u : count;
+}
+
+void kittyin_action_map_init(kittyin_action_map *map)
+{
+    if (map == NULL) return;
+    (void)memset(map, 0, sizeof *map);
+    map->repeat_delay_ms = 320u;
+    map->repeat_interval_ms = 85u;
+    map->axis_dead_zone = INT16_C(12000);
+    map->active_gamepad = KITTYIN_GAMEPAD_ANY;
+    map->active_device = (uint8_t)KITTYIN_DEVICE_KEYBOARD;
+}
+
+static bool binding_equals(const kittyin_action_binding *binding,
+                           uint16_t action, uint8_t kind,
+                           uint32_t key, uint32_t modifiers,
+                           uint8_t gamepad, uint8_t control,
+                           int direction)
+{
+    return binding != NULL && binding->action == action &&
+           binding->kind == kind && binding->key == key &&
+           binding->modifiers == modifiers &&
+           binding->gamepad == gamepad &&
+           binding->control == control &&
+           binding->direction == direction;
+}
+
+static bool append_binding(kittyin_action_map *map, uint16_t action,
+                           uint8_t kind, uint32_t key,
+                           uint32_t modifiers, uint8_t gamepad,
+                           uint8_t control, int direction)
+{
+    size_t index;
+
+    if (map == NULL || action >= KITTYIN_ACTION_CAPACITY ||
+        map->binding_count >= KITTYIN_ACTION_BINDING_CAPACITY)
+        return false;
+    for (index = 0u; index < map->binding_count; ++index)
+        if (binding_equals(&map->bindings[index], action, kind, key,
+                           modifiers, gamepad, control, direction))
+            return true;
+    map->bindings[map->binding_count++] = (kittyin_action_binding){
+        key, modifiers, action, kind, gamepad, control,
+        (int8_t)direction, 0u
+    };
+    return true;
+}
+
+bool kittyin_action_map_bind_key(kittyin_action_map *map, uint16_t action,
+                                 uint32_t key, uint32_t modifiers)
+{
+    if (key == KITTYKB_KEY_NONE ||
+        (modifiers & ~action_modifier_mask()) != 0u) return false;
+    return append_binding(map, action, (uint8_t)KITTYIN_BINDING_KEY,
+                          key, modifiers, KITTYIN_GAMEPAD_ANY, 0u, 0);
+}
+
+static bool valid_gamepad_binding(uint8_t gamepad)
+{
+    return gamepad == KITTYIN_GAMEPAD_ANY ||
+           gamepad < KITTYIN_GAMEPAD_CAPACITY;
+}
+
+bool kittyin_action_map_bind_gamepad_button(kittyin_action_map *map,
+                                            uint16_t action,
+                                            uint8_t gamepad,
+                                            uint8_t button)
+{
+    if (!valid_gamepad_binding(gamepad)) return false;
+    return append_binding(
+        map, action, (uint8_t)KITTYIN_BINDING_GAMEPAD_BUTTON,
+        0u, 0u, gamepad, button, 0);
+}
+
+bool kittyin_action_map_bind_gamepad_axis(kittyin_action_map *map,
+                                          uint16_t action,
+                                          uint8_t gamepad, uint8_t axis,
+                                          int direction)
+{
+    if (!valid_gamepad_binding(gamepad) ||
+        (direction != -1 && direction != 1)) return false;
+    return append_binding(
+        map, action, (uint8_t)KITTYIN_BINDING_GAMEPAD_AXIS,
+        0u, 0u, gamepad, axis, direction);
+}
+
+static unsigned int action_popcount(uint8_t value)
+{
+    unsigned int count = 0u;
+
+    while (value != 0u) {
+        count += (unsigned int)(value & UINT8_C(1));
+        value = (uint8_t)(value >> 1u);
+    }
+    return count;
+}
+
+size_t kittyin_action_map_unbind(kittyin_action_map *map, uint16_t action,
+                                 kittyin_device_kind device)
+{
+    size_t read_index;
+    size_t write_index = 0u;
+    size_t removed = 0u;
+
+    if (map == NULL || action >= KITTYIN_ACTION_CAPACITY ||
+        (device != KITTYIN_DEVICE_KEYBOARD &&
+         device != KITTYIN_DEVICE_GAMEPAD)) return 0u;
+    for (read_index = 0u; read_index < map->binding_count; ++read_index) {
+        kittyin_action_binding binding = map->bindings[read_index];
+        const bool is_keyboard =
+            binding.kind == (uint8_t)KITTYIN_BINDING_KEY;
+        const bool selected =
+            binding.action == action &&
+            ((device == KITTYIN_DEVICE_KEYBOARD && is_keyboard) ||
+             (device == KITTYIN_DEVICE_GAMEPAD && !is_keyboard));
+
+        if (selected) {
+            kittyin_action_state *state = &map->actions[action];
+            const unsigned int down =
+                action_popcount(binding.down_gamepads);
+
+            state->sources = state->sources > down ?
+                (uint16_t)(state->sources - down) : 0u;
+            if (state->sources == 0u)
+                *state = (kittyin_action_state){0};
+            ++removed;
+            continue;
+        }
+        map->bindings[write_index++] = binding;
+    }
+    map->binding_count = write_index;
+    return removed;
+}
+
+bool kittyin_action_map_has_binding(const kittyin_action_map *map,
+                                    uint16_t action,
+                                    kittyin_device_kind device)
+{
+    size_t index;
+
+    if (map == NULL || action >= KITTYIN_ACTION_CAPACITY) return false;
+    for (index = 0u; index < map->binding_count; ++index) {
+        const kittyin_action_binding *binding = &map->bindings[index];
+        const bool is_keyboard =
+            binding->kind == (uint8_t)KITTYIN_BINDING_KEY;
+
+        if (binding->action == action &&
+            ((device == KITTYIN_DEVICE_KEYBOARD && is_keyboard) ||
+             (device == KITTYIN_DEVICE_GAMEPAD && !is_keyboard)))
+            return true;
+    }
+    return false;
+}
+
+bool kittyin_action_map_set_repeat(kittyin_action_map *map,
+                                   uint32_t delay_ms,
+                                   uint32_t interval_ms)
+{
+    if (map == NULL || delay_ms < 50u || delay_ms > 5000u ||
+        interval_ms < 16u || interval_ms > 1000u) return false;
+    map->repeat_delay_ms = delay_ms;
+    map->repeat_interval_ms = interval_ms;
+    return true;
+}
+
+bool kittyin_action_map_set_dead_zone(kittyin_action_map *map,
+                                      int dead_zone)
+{
+    if (map == NULL || dead_zone < 1 || dead_zone > INT16_MAX)
+        return false;
+    map->axis_dead_zone = (int16_t)dead_zone;
+    return true;
+}
+
+size_t kittyin_action_map_key(kittyin_action_map *map,
+                              const kittykb_event *key,
+                              kittyin_action_event *events,
+                              size_t capacity)
+{
+    bool emitted[KITTYIN_ACTION_CAPACITY] = {false};
+    bool matched = false;
+    kittyin_action_phase phase;
+    size_t count = 0u;
+    size_t index;
+
+    if (map == NULL || key == NULL ||
+        (events == NULL && capacity != 0u)) return 0u;
+    if (key->action == KITTYKB_ACTION_PRESS)
+        phase = KITTYIN_ACTION_PRESS;
+    else if (key->action == KITTYKB_ACTION_REPEAT)
+        phase = KITTYIN_ACTION_REPEAT;
+    else if (key->action == KITTYKB_ACTION_RELEASE)
+        phase = KITTYIN_ACTION_RELEASE;
+    else
+        return 0u;
+    for (index = 0u; index < map->binding_count; ++index) {
+        const kittyin_action_binding *binding = &map->bindings[index];
+
+        if (binding->kind != (uint8_t)KITTYIN_BINDING_KEY ||
+            emitted[binding->action] ||
+            !action_key_matches(binding, key)) continue;
+        matched = true;
+        emitted[binding->action] = true;
+        count = append_action_event(
+            events, capacity, count, binding->action, phase,
+            KITTYIN_DEVICE_KEYBOARD, KITTYIN_GAMEPAD_ANY);
+    }
+    if (matched && phase != KITTYIN_ACTION_RELEASE) {
+        map->active_device = (uint8_t)KITTYIN_DEVICE_KEYBOARD;
+        map->active_gamepad = KITTYIN_GAMEPAD_ANY;
+    }
+    return count;
+}
+
+static bool binding_accepts_gamepad(
+    const kittyin_action_binding *binding, uint8_t gamepad)
+{
+    return binding->gamepad == KITTYIN_GAMEPAD_ANY ||
+           binding->gamepad == gamepad;
+}
+
+static size_t set_gamepad_binding(
+    kittyin_action_map *map, kittyin_action_binding *binding,
+    uint8_t gamepad, bool down, kittyin_action_event *events,
+    size_t capacity, size_t count)
+{
+    const uint8_t bit =
+        (uint8_t)(UINT8_C(1) << (unsigned int)gamepad);
+    const bool was_down = (binding->down_gamepads & bit) != 0u;
+    kittyin_action_state *state;
+
+    if (was_down == down) return count;
+    state = &map->actions[binding->action];
+    if (down) {
+        binding->down_gamepads |= bit;
+        if (state->sources < UINT16_MAX) ++state->sources;
+        state->gamepad = gamepad;
+        if (state->sources == 1u) {
+            state->held_ms = 0u;
+            state->next_repeat_ms = map->repeat_delay_ms;
+            count = append_action_event(
+                events, capacity, count, binding->action,
+                KITTYIN_ACTION_PRESS, KITTYIN_DEVICE_GAMEPAD, gamepad);
+        }
+        map->active_device = (uint8_t)KITTYIN_DEVICE_GAMEPAD;
+        map->active_gamepad = gamepad;
+    } else {
+        binding->down_gamepads &= (uint8_t)~bit;
+        if (state->sources > 0u) --state->sources;
+        if (state->sources == 0u) {
+            count = append_action_event(
+                events, capacity, count, binding->action,
+                KITTYIN_ACTION_RELEASE, KITTYIN_DEVICE_GAMEPAD, gamepad);
+            *state = (kittyin_action_state){0};
+        }
+    }
+    return count;
+}
+
+static uint8_t first_connected_gamepad(uint8_t mask)
+{
+    uint8_t gamepad;
+
+    for (gamepad = 0u; gamepad < KITTYIN_GAMEPAD_CAPACITY; ++gamepad)
+        if ((mask & (uint8_t)(UINT8_C(1) << gamepad)) != 0u)
+            return gamepad;
+    return KITTYIN_GAMEPAD_ANY;
+}
+
+size_t kittyin_action_map_gamepad(kittyin_action_map *map,
+                                  const kittyin_gamepad_event *gamepad,
+                                  kittyin_action_event *events,
+                                  size_t capacity)
+{
+    const uint8_t bit = (uint8_t)(
+        gamepad != NULL && gamepad->gamepad < KITTYIN_GAMEPAD_CAPACITY ?
+        (UINT32_C(1) << gamepad->gamepad) : UINT32_C(0));
+    size_t count = 0u;
+    size_t index;
+
+    if (map == NULL || gamepad == NULL || bit == 0u ||
+        (events == NULL && capacity != 0u)) return 0u;
+    if (gamepad->kind == KITTYIN_GAMEPAD_CONNECTED) {
+        map->connected_gamepads |= bit;
+        return 0u;
+    }
+    if (gamepad->kind == KITTYIN_GAMEPAD_DISCONNECTED) {
+        for (index = 0u; index < map->binding_count; ++index) {
+            kittyin_action_binding *binding = &map->bindings[index];
+
+            if (binding->kind == (uint8_t)KITTYIN_BINDING_KEY ||
+                (binding->down_gamepads & bit) == 0u) continue;
+            count = set_gamepad_binding(
+                map, binding, gamepad->gamepad, false,
+                events, capacity, count);
+        }
+        map->connected_gamepads &= (uint8_t)~bit;
+        if (map->active_device == (uint8_t)KITTYIN_DEVICE_GAMEPAD &&
+            map->active_gamepad == gamepad->gamepad) {
+            map->active_gamepad =
+                first_connected_gamepad(map->connected_gamepads);
+            if (map->active_gamepad == KITTYIN_GAMEPAD_ANY)
+                map->active_device = (uint8_t)KITTYIN_DEVICE_KEYBOARD;
+        }
+        return count;
+    }
+    if (gamepad->initial ||
+        (gamepad->kind != KITTYIN_GAMEPAD_BUTTON &&
+         gamepad->kind != KITTYIN_GAMEPAD_AXIS))
+        return 0u;
+    map->connected_gamepads |= bit;
+    for (index = 0u; index < map->binding_count; ++index) {
+        kittyin_action_binding *binding = &map->bindings[index];
+        bool down;
+
+        if (!binding_accepts_gamepad(binding, gamepad->gamepad) ||
+            binding->control != gamepad->control) continue;
+        if (gamepad->kind == KITTYIN_GAMEPAD_BUTTON) {
+            if (binding->kind !=
+                (uint8_t)KITTYIN_BINDING_GAMEPAD_BUTTON) continue;
+            down = gamepad->value != 0;
+        } else {
+            const int value = (int)gamepad->value;
+            const int dead_zone = (int)map->axis_dead_zone;
+
+            if (binding->kind !=
+                (uint8_t)KITTYIN_BINDING_GAMEPAD_AXIS) continue;
+            down = binding->direction < 0 ?
+                value <= -dead_zone : value >= dead_zone;
+        }
+        count = set_gamepad_binding(
+            map, binding, gamepad->gamepad, down,
+            events, capacity, count);
+    }
+    return count;
+}
+
+size_t kittyin_action_map_advance(kittyin_action_map *map,
+                                  uint32_t elapsed_ms,
+                                  kittyin_action_event *events,
+                                  size_t capacity)
+{
+    size_t count = 0u;
+    size_t action;
+
+    if (map == NULL || (events == NULL && capacity != 0u)) return 0u;
+    for (action = 0u; action < KITTYIN_ACTION_CAPACITY; ++action) {
+        kittyin_action_state *state = &map->actions[action];
+        uint64_t held;
+        uint64_t next;
+
+        if (state->sources == 0u) continue;
+        held = (uint64_t)state->held_ms + elapsed_ms;
+        state->held_ms =
+            held > UINT32_MAX ? UINT32_MAX : (uint32_t)held;
+        if (state->held_ms < state->next_repeat_ms) continue;
+        count = append_action_event(
+            events, capacity, count, (uint16_t)action,
+            KITTYIN_ACTION_REPEAT, KITTYIN_DEVICE_GAMEPAD,
+            state->gamepad);
+        next = (uint64_t)state->next_repeat_ms +
+               map->repeat_interval_ms;
+        while (next <= state->held_ms && next < UINT32_MAX)
+            next += map->repeat_interval_ms;
+        state->next_repeat_ms =
+            next > UINT32_MAX ? UINT32_MAX : (uint32_t)next;
+        map->active_device = (uint8_t)KITTYIN_DEVICE_GAMEPAD;
+        map->active_gamepad = state->gamepad;
+    }
+    return count;
+}
+
+size_t kittyin_action_map_release_all(kittyin_action_map *map,
+                                      kittyin_action_event *events,
+                                      size_t capacity)
+{
+    size_t count = 0u;
+    size_t index;
+
+    if (map == NULL || (events == NULL && capacity != 0u)) return 0u;
+    for (index = 0u; index < map->binding_count; ++index) {
+        kittyin_action_binding *binding = &map->bindings[index];
+        uint8_t gamepad;
+
+        if (binding->kind == (uint8_t)KITTYIN_BINDING_KEY) continue;
+        for (gamepad = 0u;
+             gamepad < KITTYIN_GAMEPAD_CAPACITY; ++gamepad)
+            if ((binding->down_gamepads &
+                 (uint8_t)(UINT8_C(1) << gamepad)) != 0u)
+                count = set_gamepad_binding(
+                    map, binding, gamepad, false,
+                    events, capacity, count);
+    }
+    return count;
+}
+
+kittyin_device_kind
+kittyin_action_map_active_device(const kittyin_action_map *map)
+{
+    return map != NULL &&
+           map->active_device == (uint8_t)KITTYIN_DEVICE_GAMEPAD ?
+           KITTYIN_DEVICE_GAMEPAD : KITTYIN_DEVICE_KEYBOARD;
+}
+
+uint8_t kittyin_action_map_active_gamepad(const kittyin_action_map *map)
+{
+    return map != NULL ? map->active_gamepad : KITTYIN_GAMEPAD_ANY;
+}

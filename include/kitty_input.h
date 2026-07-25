@@ -18,12 +18,16 @@ extern "C" {
 #endif
 
 #define KITTYIN_VERSION_MAJOR 0
-#define KITTYIN_VERSION_MINOR 1
+#define KITTYIN_VERSION_MINOR 2
 #define KITTYIN_VERSION_PATCH 0
 
 #define KITTYIN_EVENT_QUEUE_CAPACITY 128u
 #define KITTYIN_SEQUENCE_CAPACITY 256u
 #define KITTYIN_PASTE_CHUNK_CAPACITY 128u
+#define KITTYIN_ACTION_CAPACITY 64u
+#define KITTYIN_ACTION_BINDING_CAPACITY 96u
+#define KITTYIN_GAMEPAD_CAPACITY 4u
+#define KITTYIN_GAMEPAD_ANY UINT8_MAX
 
 typedef enum kittyin_event_kind {
     KITTYIN_EVENT_KEY = 1,
@@ -80,6 +84,79 @@ typedef struct kittyin_stats {
     uint64_t paste_chunks;
 } kittyin_stats;
 
+typedef enum kittyin_device_kind {
+    KITTYIN_DEVICE_KEYBOARD = 1,
+    KITTYIN_DEVICE_GAMEPAD = 2
+} kittyin_device_kind;
+
+typedef enum kittyin_gamepad_event_kind {
+    KITTYIN_GAMEPAD_CONNECTED = 1,
+    KITTYIN_GAMEPAD_DISCONNECTED = 2,
+    KITTYIN_GAMEPAD_BUTTON = 3,
+    KITTYIN_GAMEPAD_AXIS = 4
+} kittyin_gamepad_event_kind;
+
+typedef struct kittyin_gamepad_event {
+    kittyin_gamepad_event_kind kind;
+    uint8_t gamepad;
+    uint8_t control;
+    int16_t value;
+    bool initial;
+} kittyin_gamepad_event;
+
+typedef enum kittyin_action_phase {
+    KITTYIN_ACTION_PRESS = 1,
+    KITTYIN_ACTION_REPEAT = 2,
+    KITTYIN_ACTION_RELEASE = 3
+} kittyin_action_phase;
+
+typedef struct kittyin_action_event {
+    uint16_t action;
+    kittyin_action_phase phase;
+    kittyin_device_kind device;
+    uint8_t gamepad;
+} kittyin_action_event;
+
+typedef enum kittyin_action_binding_kind {
+    KITTYIN_BINDING_KEY = 1,
+    KITTYIN_BINDING_GAMEPAD_BUTTON = 2,
+    KITTYIN_BINDING_GAMEPAD_AXIS = 3
+} kittyin_action_binding_kind;
+
+typedef struct kittyin_action_binding {
+    uint32_t key;
+    uint32_t modifiers;
+    uint16_t action;
+    uint8_t kind;
+    uint8_t gamepad;
+    uint8_t control;
+    int8_t direction;
+    uint8_t down_gamepads;
+} kittyin_action_binding;
+
+typedef struct kittyin_action_state {
+    uint32_t held_ms;
+    uint32_t next_repeat_ms;
+    uint16_t sources;
+    uint8_t gamepad;
+} kittyin_action_state;
+
+/*
+ * Public so callers can allocate without malloc. Fields are internal.
+ * Action zero is valid; consumers define the meaning of all action IDs.
+ */
+typedef struct kittyin_action_map {
+    kittyin_action_binding bindings[KITTYIN_ACTION_BINDING_CAPACITY];
+    kittyin_action_state actions[KITTYIN_ACTION_CAPACITY];
+    size_t binding_count;
+    uint32_t repeat_delay_ms;
+    uint32_t repeat_interval_ms;
+    int16_t axis_dead_zone;
+    uint8_t connected_gamepads;
+    uint8_t active_gamepad;
+    uint8_t active_device;
+} kittyin_action_map;
+
 /* Public so callers can allocate without malloc. Fields are internal. */
 typedef struct kittyin_input {
     kittyin_event queue[KITTYIN_EVENT_QUEUE_CAPACITY];
@@ -121,6 +198,50 @@ bool kittyin_input_has_release_events(const kittyin_input *input);
 size_t kittyin_input_held_count(const kittyin_input *input);
 
 const kittyin_stats *kittyin_input_get_stats(const kittyin_input *input);
+
+/*
+ * Semantic action mapping. Keyboard repeat events pass through unchanged.
+ * Gamepad buttons and axes use advance() for deterministic held repeat.
+ */
+void kittyin_action_map_init(kittyin_action_map *map);
+bool kittyin_action_map_bind_key(kittyin_action_map *map, uint16_t action,
+                                 uint32_t key, uint32_t modifiers);
+bool kittyin_action_map_bind_gamepad_button(kittyin_action_map *map,
+                                            uint16_t action,
+                                            uint8_t gamepad,
+                                            uint8_t button);
+bool kittyin_action_map_bind_gamepad_axis(kittyin_action_map *map,
+                                          uint16_t action,
+                                          uint8_t gamepad, uint8_t axis,
+                                          int direction);
+size_t kittyin_action_map_unbind(kittyin_action_map *map, uint16_t action,
+                                 kittyin_device_kind device);
+bool kittyin_action_map_has_binding(const kittyin_action_map *map,
+                                    uint16_t action,
+                                    kittyin_device_kind device);
+bool kittyin_action_map_set_repeat(kittyin_action_map *map,
+                                   uint32_t delay_ms,
+                                   uint32_t interval_ms);
+bool kittyin_action_map_set_dead_zone(kittyin_action_map *map,
+                                      int dead_zone);
+size_t kittyin_action_map_key(kittyin_action_map *map,
+                              const kittykb_event *key,
+                              kittyin_action_event *events,
+                              size_t capacity);
+size_t kittyin_action_map_gamepad(kittyin_action_map *map,
+                                  const kittyin_gamepad_event *gamepad,
+                                  kittyin_action_event *events,
+                                  size_t capacity);
+size_t kittyin_action_map_advance(kittyin_action_map *map,
+                                  uint32_t elapsed_ms,
+                                  kittyin_action_event *events,
+                                  size_t capacity);
+size_t kittyin_action_map_release_all(kittyin_action_map *map,
+                                      kittyin_action_event *events,
+                                      size_t capacity);
+kittyin_device_kind
+kittyin_action_map_active_device(const kittyin_action_map *map);
+uint8_t kittyin_action_map_active_gamepad(const kittyin_action_map *map);
 
 #ifdef __cplusplus
 }
