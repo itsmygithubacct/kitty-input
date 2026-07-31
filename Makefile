@@ -28,7 +28,8 @@ TEST_BIN := $(BUILD_DIR)/test-input
 EXAMPLE_BIN := $(BUILD_DIR)/events
 DEPS := $(LIB_OBJS:.o=.d)
 
-.PHONY: all clean install sanitize test
+.PHONY: all clean install keyboard-all keyboard-clean keyboard-sanitize \
+	keyboard-test sanitize test
 
 all: $(STATIC_LIB) $(SHARED_LIB) $(EXAMPLE_BIN)
 
@@ -61,6 +62,18 @@ $(EXAMPLE_BIN): examples/events.c $(STATIC_LIB) | $(BUILD_DIR)
 
 test: $(TEST_BIN)
 	$(TEST_BIN)
+
+keyboard-all:
+	$(MAKE) -C $(KITTY_KEYBOARD_DIR) all
+
+keyboard-test:
+	$(MAKE) -C $(KITTY_KEYBOARD_DIR) test
+
+keyboard-sanitize:
+	$(MAKE) -C $(KITTY_KEYBOARD_DIR) sanitize
+
+keyboard-clean:
+	$(MAKE) -C $(KITTY_KEYBOARD_DIR) clean
 
 sanitize: | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -std=c11 -O1 -g3 $(WARNINGS) \

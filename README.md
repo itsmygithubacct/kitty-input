@@ -8,10 +8,10 @@ and applications. It preserves wire order across:
 - terminal focus-in/focus-out events
 - bracketed-paste chunks
 
-Keyboard decoding and reliable held-key state come from the pinned
-[`kitty-keyboard`](https://github.com/itsmygithubacct/kitty-keyboard)
-submodule. The static and shared libraries bundle both layers, so consumers
-link one library.
+Keyboard decoding and reliable held-key state come from the bundled
+[`kitty-keyboard`](third_party/kitty_keyboard) component. Its source and
+history live in this repository, and the static and shared libraries bundle
+both layers so consumers link one library.
 
 The same allocation-free API also provides:
 
@@ -27,7 +27,7 @@ The same allocation-free API also provides:
 ## Build and test
 
 ```sh
-git clone --recurse-submodules https://github.com/itsmygithubacct/kitty-input.git
+git clone https://github.com/itsmygithubacct/kitty-input.git
 cd kitty-input
 make test
 make sanitize
@@ -35,6 +35,15 @@ make sanitize
 
 `make` builds `build/libkitty-input.a`, `build/libkitty-input.so`, and the
 `build/events` example. Run the example in a terminal and press `q` to exit.
+
+The imported keyboard component retains its standalone build and PTY test
+suite:
+
+```sh
+make keyboard-all
+make keyboard-test
+make keyboard-sanitize
+```
 
 ## Parser-only use
 
