@@ -19,6 +19,12 @@ enum string_kind {
 };
 
 static bool
+cancels_sequence(unsigned char byte)
+{
+    return byte == 0x18u || byte == 0x1au;
+}
+
+static bool
 is_unicode_scalar(uint32_t value)
 {
     return value <= 0x10ffffu &&
@@ -818,6 +824,8 @@ feed_byte(kittykb_input *input, unsigned char byte)
             input->parser_state = (uint8_t)PARSER_GROUND;
         } else if (byte == 0x1bu) {
             input->parser_state = (uint8_t)PARSER_ESCAPE;
+        } else if (cancels_sequence(byte)) {
+            input->parser_state = (uint8_t)PARSER_GROUND;
         }
         break;
 
@@ -828,7 +836,7 @@ feed_byte(kittykb_input *input, unsigned char byte)
     case PARSER_STRING:
         if (byte == 0x1bu) {
             input->parser_state = (uint8_t)PARSER_STRING_ESCAPE;
-        } else if (byte == 0x9cu ||
+        } else if (byte == 0x9cu || cancels_sequence(byte) ||
                    (input->string_kind == (uint8_t)STRING_OSC &&
                     byte == 0x07u)) {
             input->parser_state = (uint8_t)PARSER_GROUND;
@@ -837,7 +845,12 @@ feed_byte(kittykb_input *input, unsigned char byte)
         break;
 
     case PARSER_STRING_ESCAPE:
-        if (byte == (unsigned char)'\\' || byte == 0x9cu) {
+        if (byte == (unsigned char)'\\' || byte == 0x9cu ||
+            cancels_sequence(byte)) {
+            input->parser_state = (uint8_t)PARSER_GROUND;
+            ++input->stats.ignored_sequences;
+        } else if (input->string_kind == (uint8_t)STRING_OSC &&
+                   byte == 0x07u) {
             input->parser_state = (uint8_t)PARSER_GROUND;
             ++input->stats.ignored_sequences;
         } else if (byte != 0x1bu) {

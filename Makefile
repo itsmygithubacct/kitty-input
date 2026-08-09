@@ -6,6 +6,8 @@ DESTDIR ?=
 CC ?= cc
 AR ?= ar
 INSTALL ?= install
+FUZZ_CC ?= clang
+FUZZ_TIME ?= 15
 
 KITTY_KEYBOARD_DIR := third_party/kitty_keyboard
 CPPFLAGS += -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
@@ -26,10 +28,12 @@ STATIC_LIB := $(BUILD_DIR)/lib$(PROJECT).a
 SHARED_LIB := $(BUILD_DIR)/lib$(PROJECT).so
 TEST_BIN := $(BUILD_DIR)/test-input
 EXAMPLE_BIN := $(BUILD_DIR)/events
+BENCHMARK_BIN := $(BUILD_DIR)/benchmark-input
+FUZZ_BIN := $(BUILD_DIR)/fuzz-input
 DEPS := $(LIB_OBJS:.o=.d)
 
-.PHONY: all clean install keyboard-all keyboard-clean keyboard-sanitize \
-	keyboard-test sanitize test
+.PHONY: all benchmark clean fuzz install keyboard-all keyboard-clean \
+	keyboard-sanitize keyboard-test sanitize test
 
 all: $(STATIC_LIB) $(SHARED_LIB) $(EXAMPLE_BIN)
 
@@ -59,6 +63,26 @@ $(TEST_BIN): tests/test_input.c $(STATIC_LIB) | $(BUILD_DIR)
 
 $(EXAMPLE_BIN): examples/events.c $(STATIC_LIB) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS) -o $@
+
+$(BENCHMARK_BIN): benchmarks/benchmark_input.c $(STATIC_LIB) | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS) -o $@
+
+benchmark: $(BENCHMARK_BIN)
+	$(BENCHMARK_BIN)
+
+$(FUZZ_BIN): tests/fuzz_input.c src/kitty_input.c include/kitty_input.h \
+		$(KITTY_KEYBOARD_DIR)/src/kitty_keyboard.c \
+		$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h | $(BUILD_DIR)
+	$(FUZZ_CC) $(CPPFLAGS) -std=c11 -O1 -g3 $(WARNINGS) \
+		-fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined \
+		tests/fuzz_input.c src/kitty_input.c \
+		$(KITTY_KEYBOARD_DIR)/src/kitty_keyboard.c \
+		-fsanitize=fuzzer,address,undefined -o $@
+
+fuzz: $(FUZZ_BIN)
+	ASAN_OPTIONS=detect_leaks=1 $(FUZZ_BIN) \
+		-dict=tests/kitty_input.dict -max_len=4096 \
+		-max_total_time=$(FUZZ_TIME) -print_final_stats=1 -verbosity=0
 
 test: $(TEST_BIN)
 	$(TEST_BIN)

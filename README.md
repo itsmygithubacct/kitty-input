@@ -31,6 +31,8 @@ git clone https://github.com/itsmygithubacct/kitty-input.git
 cd kitty-input
 make test
 make sanitize
+make benchmark
+make fuzz FUZZ_TIME=30
 ```
 
 `make` builds `build/libkitty-input.a`, `build/libkitty-input.so`, and the
@@ -44,6 +46,11 @@ make keyboard-all
 make keyboard-test
 make keyboard-sanitize
 ```
+
+The benchmark reports median parser and action-map costs. The Clang fuzz
+target differentially checks bulk and byte-fragmented feeds and verifies
+semantic-action state/source invariants under ASan and UBSan; `FUZZ_TIME` is
+the run length in seconds.
 
 ## Parser-only use
 
@@ -106,23 +113,40 @@ kittyin_gamepads_close(&gamepads);
 ```
 
 `now_ms` is the caller's monotonic millisecond clock and `elapsed_ms` is the
-bounded time since the previous action update.
+time since the previous action update, up to `UINT32_MAX`. Missed repeat
+intervals are coalesced in constant time: each `advance()` call emits at most
+one repeat per held action rather than a catch-up burst.
 `KITTYIN_GAMEPAD_ANY` is intended for single-player mappings. Specific
 controller slots can be bound independently. A disconnect releases every
 action held by that device before active-device selection falls back to
 another connected controller or the keyboard.
 
+Legacy uppercase letters match their lowercase no-modifier bindings, and raw
+C0 encodings such as byte `0x03` match the equivalent `Ctrl+C` semantic
+binding. Initial Linux joystick snapshots establish no actions; only later
+changes synthesize presses. `kittyin_gamepads_attach_fd()` takes ownership of
+a successful descriptor attachment and makes it nonblocking and close-on-exec.
+
+Action output functions return the number actually stored, never more than
+the supplied capacity. State transitions still occur when capacity is zero or
+exhausted, so applications that must observe every transition should provide
+room for their maximum simultaneously matching actions.
+
 ## Guarantees
 
 - no heap allocation or global parser state
 - bounded queues and paste chunks with drop counters
+- disconnect retention under gamepad queue pressure (the oldest queued sample
+  is evicted and counted as dropped)
 - zero-based mouse coordinates
 - malformed SGR mouse packets never leak into text input
-- OSC/DCS/PM/APC terminal responses are filtered
+- OSC/DCS/SOS/PM/APC terminal responses are filtered with BEL/ST-specific
+  termination rules and CAN/SUB cancellation
 - held-key state is reported only after release-capable Kitty flags are known
 - safe reuse with an externally owned `kittykb_input`
 
-The public API is versioned as `0.2.0` through `KITTYIN_VERSION_*`.
+The public API is versioned as `0.2.1` through `KITTYIN_VERSION_*`. The bundled
+keyboard component is versioned as `0.1.1` through `KITTYKB_VERSION_*`.
 
 ## License
 

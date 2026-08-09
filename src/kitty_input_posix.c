@@ -330,7 +330,15 @@ static void emit_gamepad_event(kittyin_gamepads *gamepads,
     if (gamepads->event_count >=
         KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY) {
         ++gamepads->dropped_events;
-        return;
+        if (event->kind != KITTYIN_GAMEPAD_DISCONNECTED) return;
+
+        /* Losing a motion/button sample is recoverable; losing disconnect
+         * can leave every downstream action from that device stuck.  Retain
+         * the newest lifecycle truth by evicting the oldest queued event. */
+        gamepads->event_head =
+            (gamepads->event_head + 1u) %
+            KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY;
+        --gamepads->event_count;
     }
     tail = (gamepads->event_head + gamepads->event_count) %
            KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY;
@@ -379,6 +387,7 @@ bool kittyin_gamepads_attach_fd(kittyin_gamepads *gamepads, uint8_t gamepad,
     kittyin_gamepad_device *device;
     int flags;
     int descriptor_flags;
+    int failure;
 
     if (gamepads == NULL || gamepad >= KITTYIN_GAMEPAD_CAPACITY ||
         fd < 0) {
@@ -391,11 +400,17 @@ bool kittyin_gamepads_attach_fd(kittyin_gamepads *gamepads, uint8_t gamepad,
         return false;
     }
     flags = fcntl(fd, F_GETFL);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)
-        return false;
+    if (flags < 0) return false;
     descriptor_flags = fcntl(fd, F_GETFD);
-    if (descriptor_flags >= 0)
-        (void)fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC);
+    if (descriptor_flags < 0) return false;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)
+        return false;
+    if (fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0) {
+        failure = errno;
+        (void)fcntl(fd, F_SETFL, flags);
+        errno = failure;
+        return false;
+    }
     device->fd = fd;
     device->axes = axes;
     device->buttons = buttons;

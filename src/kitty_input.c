@@ -8,6 +8,8 @@ enum parser_state {
     PARSER_ESCAPE,
     PARSER_CSI,
     PARSER_SS3,
+    PARSER_OSC,
+    PARSER_OSC_ESCAPE,
     PARSER_STRING,
     PARSER_STRING_ESCAPE,
     PARSER_CSI_DISCARD,
@@ -16,6 +18,8 @@ enum parser_state {
 };
 
 static const unsigned char paste_end[] = {0x1bu, '[', '2', '0', '1', '~'};
+
+#define KITTYIN_KEYBOARD_FEED_BATCH_CAPACITY 8u
 
 static void emit_event(kittyin_input *input, const kittyin_event *event)
 {
@@ -198,6 +202,26 @@ static void append_paste_byte(kittyin_input *input, unsigned char byte)
     input->paste[input->paste_length++] = byte;
 }
 
+static void append_paste_bytes(kittyin_input *input,
+                               const unsigned char *bytes, size_t size)
+{
+    size_t offset = 0u;
+
+    while (offset < size) {
+        size_t available;
+        size_t count;
+
+        if (input->paste_length == KITTYIN_PASTE_CHUNK_CAPACITY)
+            emit_paste(input, false);
+        available = KITTYIN_PASTE_CHUNK_CAPACITY - input->paste_length;
+        count = size - offset < available ? size - offset : available;
+        (void)memcpy(input->paste + input->paste_length,
+                     bytes + offset, count);
+        input->paste_length += count;
+        offset += count;
+    }
+}
+
 static void handle_paste_byte(kittyin_input *input, unsigned char byte)
 {
     for (;;) {
@@ -289,9 +313,26 @@ static void start_escape(kittyin_input *input)
     input->parser_state = (uint8_t)PARSER_ESCAPE;
 }
 
+static void start_control_string(kittyin_input *input, bool osc)
+{
+    input->sequence_length = 0u;
+    input->parser_state = (uint8_t)(osc ? PARSER_OSC : PARSER_STRING);
+}
+
+static void finish_control_string(kittyin_input *input)
+{
+    ++input->stats.ignored_sequences;
+    input->parser_state = (uint8_t)PARSER_GROUND;
+}
+
 static bool is_csi_final(unsigned char byte)
 {
     return byte >= 0x40u && byte <= 0x7eu;
+}
+
+static bool cancels_sequence(unsigned char byte)
+{
+    return byte == 0x18u || byte == 0x1au;
 }
 
 void kittyin_input_feed(kittyin_input *input, const void *bytes,
@@ -304,6 +345,12 @@ void kittyin_input_feed(kittyin_input *input, const void *bytes,
         (bytes == NULL && byte_count != 0u)) return;
     input->stats.bytes_fed += byte_count;
     drain_keyboard(input);
+    if (byte_count == 1u &&
+        input->parser_state == (uint8_t)PARSER_GROUND &&
+        source[0] != 0x1bu) {
+        feed_keyboard(input, source, 1u);
+        return;
+    }
 
     for (index = 0u; index < byte_count; ++index) {
         const unsigned char byte = source[index];
@@ -311,7 +358,19 @@ void kittyin_input_feed(kittyin_input *input, const void *bytes,
         switch ((enum parser_state)input->parser_state) {
         case PARSER_GROUND:
             if (byte == 0x1bu) start_escape(input);
-            else feed_keyboard(input, &byte, 1u);
+            else {
+                const size_t remaining = byte_count - index;
+                size_t run = 1u;
+
+                /* A byte can produce at most one keyboard event.  Keeping
+                 * each batch below the decoder queue size preserves outer
+                 * drop accounting while avoiding a call and drain per byte. */
+                while (run < remaining &&
+                       run < KITTYIN_KEYBOARD_FEED_BATCH_CAPACITY &&
+                       source[index + run] != 0x1bu) ++run;
+                feed_keyboard(input, source + index, run);
+                index += run - 1u;
+            }
             break;
 
         case PARSER_ESCAPE:
@@ -321,12 +380,13 @@ void kittyin_input_feed(kittyin_input *input, const void *bytes,
             } else if (byte == (unsigned char)'O') {
                 (void)append_sequence(input, byte);
                 input->parser_state = (uint8_t)PARSER_SS3;
-            } else if (byte == (unsigned char)']' ||
-                       byte == (unsigned char)'P' ||
+            } else if (byte == (unsigned char)']') {
+                start_control_string(input, true);
+            } else if (byte == (unsigned char)'P' ||
                        byte == (unsigned char)'^' ||
-                       byte == (unsigned char)'_') {
-                input->sequence_length = 0u;
-                input->parser_state = (uint8_t)PARSER_STRING;
+                       byte == (unsigned char)'_' ||
+                       byte == (unsigned char)'X') {
+                start_control_string(input, false);
             } else if (byte == 0x1bu) {
                 const unsigned char escape = 0x1bu;
 
@@ -344,7 +404,14 @@ void kittyin_input_feed(kittyin_input *input, const void *bytes,
             break;
 
         case PARSER_CSI:
-            if (!append_sequence(input, byte)) {
+            if (byte == 0x1bu) {
+                ++input->stats.malformed_sequences;
+                start_escape(input);
+            } else if (cancels_sequence(byte)) {
+                ++input->stats.malformed_sequences;
+                input->sequence_length = 0u;
+                input->parser_state = (uint8_t)PARSER_GROUND;
+            } else if (!append_sequence(input, byte)) {
                 input->parser_state = (uint8_t)PARSER_CSI_DISCARD;
             } else if (is_csi_final(byte)) {
                 input->parser_state = (uint8_t)PARSER_GROUND;
@@ -355,7 +422,14 @@ void kittyin_input_feed(kittyin_input *input, const void *bytes,
             break;
 
         case PARSER_SS3:
-            if (!append_sequence(input, byte)) {
+            if (byte == 0x1bu) {
+                ++input->stats.malformed_sequences;
+                start_escape(input);
+            } else if (cancels_sequence(byte)) {
+                ++input->stats.malformed_sequences;
+                input->sequence_length = 0u;
+                input->parser_state = (uint8_t)PARSER_GROUND;
+            } else if (!append_sequence(input, byte)) {
                 input->parser_state = (uint8_t)PARSER_SS3_DISCARD;
             } else if (byte >= 0x30u && byte <= 0x7eu) {
                 feed_keyboard(input, input->sequence,
@@ -365,36 +439,65 @@ void kittyin_input_feed(kittyin_input *input, const void *bytes,
             }
             break;
 
+        case PARSER_OSC:
+            if (byte == 0x07u || byte == 0x9cu ||
+                cancels_sequence(byte))
+                finish_control_string(input);
+            else if (byte == 0x1bu)
+                input->parser_state = (uint8_t)PARSER_OSC_ESCAPE;
+            break;
+
+        case PARSER_OSC_ESCAPE:
+            if (byte == (unsigned char)'\\' || byte == 0x9cu ||
+                byte == 0x07u || cancels_sequence(byte))
+                finish_control_string(input);
+            else if (byte != 0x1bu)
+                input->parser_state = (uint8_t)PARSER_OSC;
+            break;
+
         case PARSER_STRING:
-            if (byte == 0x07u) {
-                ++input->stats.ignored_sequences;
-                input->parser_state = (uint8_t)PARSER_GROUND;
-            } else if (byte == 0x1bu) {
+            if (byte == 0x9cu || cancels_sequence(byte))
+                finish_control_string(input);
+            else if (byte == 0x1bu)
                 input->parser_state = (uint8_t)PARSER_STRING_ESCAPE;
-            }
             break;
 
         case PARSER_STRING_ESCAPE:
-            if (byte == (unsigned char)'\\') {
-                ++input->stats.ignored_sequences;
-                input->parser_state = (uint8_t)PARSER_GROUND;
-            } else if (byte != 0x1bu) {
+            if (byte == (unsigned char)'\\' || byte == 0x9cu ||
+                cancels_sequence(byte))
+                finish_control_string(input);
+            else if (byte != 0x1bu)
                 input->parser_state = (uint8_t)PARSER_STRING;
-            }
             break;
 
         case PARSER_CSI_DISCARD:
-            if (is_csi_final(byte))
+            if (byte == 0x1bu)
+                start_escape(input);
+            else if (is_csi_final(byte) || cancels_sequence(byte))
                 input->parser_state = (uint8_t)PARSER_GROUND;
             break;
 
         case PARSER_SS3_DISCARD:
-            if (byte >= 0x30u && byte <= 0x7eu)
+            if (byte == 0x1bu)
+                start_escape(input);
+            else if ((byte >= 0x30u && byte <= 0x7eu) ||
+                     cancels_sequence(byte))
                 input->parser_state = (uint8_t)PARSER_GROUND;
             break;
 
         case PARSER_PASTE:
-            handle_paste_byte(input, byte);
+            if (input->paste_match_length == 0u && byte != 0x1bu &&
+                index + 1u < byte_count) {
+                const size_t remaining = byte_count - index;
+                const unsigned char *next_escape =
+                    memchr(source + index, 0x1b, remaining);
+                const size_t run = next_escape != NULL ?
+                    (size_t)(next_escape - (source + index)) : remaining;
+
+                append_paste_bytes(input, source + index, run);
+                index += run - 1u;
+            } else
+                handle_paste_byte(input, byte);
             break;
         }
     }
@@ -481,15 +584,40 @@ static bool action_key_matches(const kittyin_action_binding *binding,
                                const kittykb_event *key)
 {
     uint32_t modifiers;
+    uint32_t control_key;
+    bool matches;
 
-    if (binding == NULL || key == NULL ||
-        !kittykb_event_matches_key(key, binding->key)) return false;
+    if (binding == NULL || key == NULL) return false;
+    matches = kittykb_event_matches_key(key, binding->key);
+    if (matches) {
+        modifiers = key->modifiers & action_modifier_mask();
+        if (modifiers == binding->modifiers) return true;
+        return binding->key >= (uint32_t)'a' &&
+               binding->key <= (uint32_t)'z' &&
+               binding->modifiers == 0u &&
+               modifiers == KITTYKB_MOD_SHIFT;
+    }
+    if (binding->key < (uint32_t)'@' ||
+        binding->key > (uint32_t)'z') return false;
     modifiers = key->modifiers & action_modifier_mask();
-    if (modifiers == binding->modifiers) return true;
-    return binding->modifiers == 0u &&
-           modifiers == KITTYKB_MOD_SHIFT &&
-           binding->key >= (uint32_t)'a' &&
-           binding->key <= (uint32_t)'z';
+    if (binding->key >= (uint32_t)'a' &&
+        binding->key <= (uint32_t)'z') {
+        if (binding->modifiers == 0u && modifiers == 0u &&
+            key->key == binding->key - (uint32_t)'a' +
+                        (uint32_t)'A') return true;
+        control_key = binding->key - (uint32_t)'a' + 1u;
+    } else if (binding->key >= (uint32_t)'@' &&
+               binding->key <= (uint32_t)'_') {
+        control_key = binding->key & UINT32_C(0x1f);
+    } else {
+        return false;
+    }
+
+    /* Legacy terminals encode Ctrl+A through Ctrl+Z as C0 bytes.  Preserve
+     * the decoder's raw event representation while allowing semantic
+     * bindings to match the equivalent enhanced-protocol key/modifier pair. */
+    return key->key == control_key &&
+           (modifiers | KITTYKB_MOD_CTRL) == binding->modifiers;
 }
 
 static size_t append_action_event(kittyin_action_event *events,
@@ -601,6 +729,47 @@ static unsigned int action_popcount(uint8_t value)
     return count;
 }
 
+static bool action_has_gamepad_source(const kittyin_action_map *map,
+                                      uint16_t action, uint8_t gamepad)
+{
+    uint8_t bit = 0u;
+    size_t index;
+
+    if (gamepad < KITTYIN_GAMEPAD_CAPACITY)
+        bit = (uint8_t)(UINT8_C(1) << (unsigned int)gamepad);
+    if (bit == 0u) return false;
+    for (index = 0u; index < map->binding_count; ++index) {
+        const kittyin_action_binding *binding = &map->bindings[index];
+
+        if (binding->action == action &&
+            binding->kind != (uint8_t)KITTYIN_BINDING_KEY &&
+            (binding->down_gamepads & bit) != 0u) return true;
+    }
+    return false;
+}
+
+static void repair_action_gamepad(kittyin_action_map *map, uint16_t action)
+{
+    kittyin_action_state *state = &map->actions[action];
+    size_t index;
+
+    if (state->sources == 0u ||
+        action_has_gamepad_source(map, action, state->gamepad)) return;
+    for (index = 0u; index < map->binding_count; ++index) {
+        const kittyin_action_binding *binding = &map->bindings[index];
+        uint8_t gamepad;
+
+        if (binding->action != action ||
+            binding->kind == (uint8_t)KITTYIN_BINDING_KEY) continue;
+        for (gamepad = 0u; gamepad < KITTYIN_GAMEPAD_CAPACITY; ++gamepad)
+            if ((binding->down_gamepads &
+                 (uint8_t)(UINT8_C(1) << gamepad)) != 0u) {
+                state->gamepad = gamepad;
+                return;
+            }
+    }
+}
+
 size_t kittyin_action_map_unbind(kittyin_action_map *map, uint16_t action,
                                  kittyin_device_kind device)
 {
@@ -635,6 +804,8 @@ size_t kittyin_action_map_unbind(kittyin_action_map *map, uint16_t action,
         map->bindings[write_index++] = binding;
     }
     map->binding_count = write_index;
+    if (map->actions[action].sources != 0u)
+        repair_action_gamepad(map, action);
     return removed;
 }
 
@@ -758,7 +929,8 @@ static size_t set_gamepad_binding(
                 events, capacity, count, binding->action,
                 KITTYIN_ACTION_RELEASE, KITTYIN_DEVICE_GAMEPAD, gamepad);
             *state = (kittyin_action_state){0};
-        }
+        } else
+            repair_action_gamepad(map, binding->action);
     }
     return count;
 }
@@ -855,7 +1027,7 @@ size_t kittyin_action_map_advance(kittyin_action_map *map,
         uint64_t held;
         uint64_t next;
 
-        if (state->sources == 0u) continue;
+        if (state->sources == 0u || state->next_repeat_ms == 0u) continue;
         held = (uint64_t)state->held_ms + elapsed_ms;
         state->held_ms =
             held > UINT32_MAX ? UINT32_MAX : (uint32_t)held;
@@ -865,11 +1037,11 @@ size_t kittyin_action_map_advance(kittyin_action_map *map,
             KITTYIN_ACTION_REPEAT, KITTYIN_DEVICE_GAMEPAD,
             state->gamepad);
         next = (uint64_t)state->next_repeat_ms +
+               ((((uint64_t)state->held_ms - state->next_repeat_ms) /
+                 map->repeat_interval_ms) + 1u) *
                map->repeat_interval_ms;
-        while (next <= state->held_ms && next < UINT32_MAX)
-            next += map->repeat_interval_ms;
         state->next_repeat_ms =
-            next > UINT32_MAX ? UINT32_MAX : (uint32_t)next;
+            next > UINT32_MAX ? 0u : (uint32_t)next;
         map->active_device = (uint8_t)KITTYIN_DEVICE_GAMEPAD;
         map->active_gamepad = state->gamepad;
     }

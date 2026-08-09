@@ -86,12 +86,15 @@ void kittyin_terminal_emergency_restore(const kittyin_terminal *terminal);
  * Allocation-free Linux joystick discovery. poll() scans directory/js0..js3,
  * reads every available event, and reports connect/disconnect transitions.
  * Other POSIX systems retain the same API and simply discover no devices.
+ * A disconnect evicts the oldest queued sample when necessary so downstream
+ * held actions can be released; the eviction increments dropped_events.
  */
 void kittyin_gamepads_init(kittyin_gamepads *gamepads);
 bool kittyin_gamepads_set_directory(kittyin_gamepads *gamepads,
                                     const char *directory);
 bool kittyin_gamepads_set_scan_interval(kittyin_gamepads *gamepads,
                                         uint32_t interval_ms);
+/* Successful attachment takes ownership and enables O_NONBLOCK/FD_CLOEXEC. */
 bool kittyin_gamepads_attach_fd(kittyin_gamepads *gamepads, uint8_t gamepad,
                                 int fd, const char *name, uint8_t axes,
                                 uint8_t buttons);

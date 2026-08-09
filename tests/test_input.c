@@ -88,6 +88,51 @@ static bool test_wire_order_and_fragmentation(void)
     return true;
 }
 
+static bool test_bulk_and_fragmented_equivalence(void)
+{
+    static const unsigned char wire[] = {
+        'a', 0xc3u, 0xa9u,
+        0x1bu, '[', '<', '0', ';', '2', ';', '3', 'M',
+        0x1bu, ']', 'o', 's', 'c', 0x9cu,
+        0x1bu, 'P', 'd', 'c', 's', 0x07u, 'x', 0x1bu, '\\',
+        0x1bu, '[', '2', '0', '0', '~',
+        'p', 'a', 's', 't', 'e', 0x1bu, '[', '2', '0', 'x',
+        0x1bu, '[', '2', '0', '1', '~',
+        0x1bu, '[', '1', '1', '3', 'u'
+    };
+    kittyin_input bulk;
+    kittyin_input fragmented;
+    kittyin_event bulk_event;
+    kittyin_event fragmented_event;
+    bool bulk_has_event;
+    bool fragmented_has_event;
+    size_t index;
+
+    kittyin_input_init(&bulk);
+    kittyin_input_init(&fragmented);
+    kittyin_input_feed(&bulk, wire, sizeof wire);
+    for (index = 0u; index < sizeof wire; ++index)
+        kittyin_input_feed(&fragmented, wire + index, 1u);
+
+    do {
+        bulk_has_event = kittyin_input_next(&bulk, &bulk_event);
+        fragmented_has_event =
+            kittyin_input_next(&fragmented, &fragmented_event);
+        CHECK(bulk_has_event == fragmented_has_event);
+        if (bulk_has_event)
+            CHECK(memcmp(&bulk_event, &fragmented_event,
+                         sizeof bulk_event) == 0);
+    } while (bulk_has_event);
+    CHECK(memcmp(kittyin_input_get_stats(&bulk),
+                 kittyin_input_get_stats(&fragmented),
+                 sizeof(kittyin_stats)) == 0);
+    CHECK(memcmp(kittykb_input_get_stats(kittyin_input_keyboard(&bulk)),
+                 kittykb_input_get_stats(
+                     kittyin_input_keyboard(&fragmented)),
+                 sizeof(kittykb_stats)) == 0);
+    return true;
+}
+
 static bool test_mouse_matrix(void)
 {
     static const char bytes[] =
@@ -197,6 +242,60 @@ static bool test_filtering_malformed_and_recovery(void)
     return true;
 }
 
+static bool test_control_string_isolation_and_resynchronization(void)
+{
+    static const unsigned char strings[] = {
+        0x1bu, 'P', 'd', 'c', 's', 0x07u, 'n', 'o', 't', '-', 't', 'e', 'x', 't',
+        0x1bu, '\\',
+        0x1bu, ']', 'o', 's', 'c', 0x9cu,
+        0x1bu, ']', 'o', 's', 'c', 0x1bu, 0x07u,
+        0x1bu, 'X', 's', 'o', 's', 0x07u, 's', 't', 'i', 'l', 'l', '-', 'h', 'i', 'd', 'd', 'e', 'n',
+        0x1bu, '\\',
+        0x1bu, 'P', 'c', 'a', 'n', 0x18u, 'r',
+        0x1bu, ']', 's', 'u', 'b', 0x1bu, 0x1au, 's',
+        'q'
+    };
+    kittyin_input input;
+    kittyin_event event;
+    char byte = '1';
+    size_t index;
+
+    kittyin_input_init(&input);
+    kittyin_input_feed(&input, strings, sizeof strings);
+    CHECK(next_event(&input, &event, KITTYIN_EVENT_KEY));
+    CHECK(event.data.key.key == (uint32_t)'r');
+    CHECK(next_event(&input, &event, KITTYIN_EVENT_KEY));
+    CHECK(event.data.key.key == (uint32_t)'s');
+    CHECK(next_event(&input, &event, KITTYIN_EVENT_KEY));
+    CHECK(event.data.key.key == (uint32_t)'q');
+    CHECK(!kittyin_input_next(&input, &event));
+    CHECK(kittyin_input_get_stats(&input)->ignored_sequences == 6u);
+
+    /* A fresh ESC must resynchronize directly from discard mode instead of
+     * leaking the replacement sequence as ordinary text. */
+    kittyin_input_init(&input);
+    kittyin_input_feed(&input, "\x1b[", 2u);
+    for (index = 0u; index < KITTYIN_SEQUENCE_CAPACITY + 8u; ++index)
+        kittyin_input_feed(&input, &byte, 1u);
+    kittyin_input_feed(&input, "\x1b[113u", 6u);
+    CHECK(next_event(&input, &event, KITTYIN_EVENT_KEY));
+    CHECK(event.data.key.key == (uint32_t)'q');
+    CHECK(!kittyin_input_next(&input, &event));
+    CHECK(kittyin_input_get_stats(&input)->malformed_sequences == 1u);
+
+    kittyin_input_init(&input);
+    kittyin_input_feed(&input, "\x1bO", 2u);
+    byte = ' ';
+    for (index = 0u; index < KITTYIN_SEQUENCE_CAPACITY + 8u; ++index)
+        kittyin_input_feed(&input, &byte, 1u);
+    kittyin_input_feed(&input, "\x1bOP", 3u);
+    CHECK(next_event(&input, &event, KITTYIN_EVENT_KEY));
+    CHECK(event.data.key.key == KITTYKB_KEY_F1);
+    CHECK(!kittyin_input_next(&input, &event));
+    CHECK(kittyin_input_get_stats(&input)->malformed_sequences == 1u);
+    return true;
+}
+
 static bool test_held_state_escape_and_external_binding(void)
 {
     kittyin_input input;
@@ -231,6 +330,7 @@ static bool test_queue_overflow(void)
 {
     kittyin_input input;
     kittyin_event event;
+    unsigned char bulk[KITTYIN_EVENT_QUEUE_CAPACITY * 3u];
     size_t index;
 
     kittyin_input_init(&input);
@@ -242,6 +342,17 @@ static bool test_queue_overflow(void)
     for (index = 0u; index < KITTYIN_EVENT_QUEUE_CAPACITY; ++index)
         CHECK(kittyin_input_next(&input, &event));
     CHECK(!kittyin_input_next(&input, &event));
+
+    /* Bulk forwarding must never overflow the embedded decoder before the
+     * ordered outer queue gets a chance to account for every event. */
+    (void)memset(bulk, 'x', sizeof bulk);
+    kittyin_input_init(&input);
+    kittyin_input_feed(&input, bulk, sizeof bulk);
+    CHECK(kittyin_input_get_stats(&input)->events_decoded == sizeof bulk);
+    CHECK(kittyin_input_get_stats(&input)->dropped_events ==
+          sizeof bulk - KITTYIN_EVENT_QUEUE_CAPACITY);
+    CHECK(kittykb_input_get_stats(kittyin_input_keyboard(&input))->
+          dropped_events == 0u);
     return true;
 }
 
@@ -256,6 +367,8 @@ static bool test_semantic_actions(void)
     kittyin_action_map_init(&map);
     CHECK(kittyin_action_map_bind_key(
         &map, 1u, (uint32_t)'w', 0u));
+    CHECK(kittyin_action_map_bind_key(
+        &map, 3u, (uint32_t)'c', KITTYKB_MOD_CTRL));
     CHECK(kittyin_action_map_bind_gamepad_button(
         &map, 1u, KITTYIN_GAMEPAD_ANY, 0u));
     CHECK(kittyin_action_map_bind_gamepad_axis(
@@ -276,6 +389,14 @@ static bool test_semantic_actions(void)
     CHECK(actions[0].device == KITTYIN_DEVICE_KEYBOARD);
     CHECK(kittyin_action_map_active_device(&map) ==
           KITTYIN_DEVICE_KEYBOARD);
+
+    key.key = (uint32_t)'W';
+    key.modifiers = 0u;
+    count = kittyin_action_map_key(&map, &key, actions, 8u);
+    CHECK(count == 1u && actions[0].action == 1u);
+    key.key = 3u;
+    count = kittyin_action_map_key(&map, &key, actions, 8u);
+    CHECK(count == 1u && actions[0].action == 3u);
 
     gamepad.kind = KITTYIN_GAMEPAD_CONNECTED;
     gamepad.gamepad = 0u;
@@ -325,10 +446,51 @@ static bool test_semantic_actions(void)
         &map, 1u, KITTYIN_DEVICE_KEYBOARD));
     CHECK(kittyin_action_map_bind_key(
         &map, 1u, (uint32_t)'k', 0u));
+    key.modifiers = 0u;
     key.key = (uint32_t)'w';
     CHECK(kittyin_action_map_key(&map, &key, actions, 8u) == 0u);
     key.key = (uint32_t)'k';
     CHECK(kittyin_action_map_key(&map, &key, actions, 8u) == 1u);
+    return true;
+}
+
+static bool test_action_repeat_bounds_and_source_attribution(void)
+{
+    kittyin_action_map map;
+    kittyin_action_event actions[4];
+    kittyin_gamepad_event gamepad = {
+        KITTYIN_GAMEPAD_BUTTON, 0u, 0u, 1, false
+    };
+    size_t count;
+
+    kittyin_action_map_init(&map);
+    CHECK(kittyin_action_map_set_repeat(&map, 50u, 16u));
+    CHECK(kittyin_action_map_bind_gamepad_button(
+        &map, 3u, KITTYIN_GAMEPAD_ANY, 0u));
+    CHECK(kittyin_action_map_gamepad(&map, &gamepad, actions, 4u) == 1u);
+    gamepad.gamepad = 1u;
+    CHECK(kittyin_action_map_gamepad(&map, &gamepad, actions, 4u) == 0u);
+    gamepad.value = 0;
+    CHECK(kittyin_action_map_gamepad(&map, &gamepad, actions, 4u) == 0u);
+    count = kittyin_action_map_advance(&map, 50u, actions, 4u);
+    CHECK(count == 1u);
+    CHECK(actions[0].phase == KITTYIN_ACTION_REPEAT);
+    CHECK(actions[0].gamepad == 0u);
+
+    /* Coalesce missed intervals in constant time and never emit repeats on
+     * zero elapsed time after the representable timeline is exhausted. */
+    kittyin_action_map_init(&map);
+    CHECK(kittyin_action_map_set_repeat(&map, 50u, 16u));
+    CHECK(kittyin_action_map_bind_gamepad_button(
+        &map, 3u, KITTYIN_GAMEPAD_ANY, 0u));
+    gamepad.gamepad = 0u;
+    gamepad.value = 1;
+    CHECK(kittyin_action_map_gamepad(&map, &gamepad, actions, 4u) == 1u);
+    CHECK(kittyin_action_map_advance(
+        &map, UINT32_MAX, actions, 4u) == 1u);
+    CHECK(kittyin_action_map_advance(&map, 0u, actions, 4u) == 0u);
+    CHECK(kittyin_action_map_advance(
+        &map, UINT32_MAX, actions, 4u) == 0u);
     return true;
 }
 
@@ -348,6 +510,8 @@ static bool test_gamepad_lifecycle(void)
     CHECK(kittyin_gamepads_attach_fd(
         &gamepads, 0u, descriptors[0], "Test Pad", 8u, 11u));
     descriptors[0] = -1;
+    CHECK((fcntl(gamepads.devices[0].fd, F_GETFL) & O_NONBLOCK) != 0);
+    CHECK((fcntl(gamepads.devices[0].fd, F_GETFD) & FD_CLOEXEC) != 0);
     CHECK(kittyin_gamepads_next(&gamepads, &event));
     CHECK(event.kind == KITTYIN_GAMEPAD_CONNECTED);
     CHECK(event.gamepad == 0u);
@@ -378,6 +542,46 @@ static bool test_gamepad_lifecycle(void)
     CHECK(event.kind == KITTYIN_GAMEPAD_DISCONNECTED);
     CHECK(!kittyin_gamepads_next(&gamepads, &event));
     CHECK(kittyin_gamepads_dropped_events(&gamepads) == 0u);
+    kittyin_gamepads_close(&gamepads);
+#endif
+    return true;
+}
+
+static bool test_gamepad_disconnect_survives_overflow(void)
+{
+#ifdef __linux__
+    kittyin_gamepads gamepads;
+    kittyin_gamepad_event event;
+    struct js_event source = {0};
+    int descriptors[2] = {-1, -1};
+    size_t index;
+
+    CHECK(pipe(descriptors) == 0);
+    kittyin_gamepads_init(&gamepads);
+    CHECK(kittyin_gamepads_set_directory(
+        &gamepads, "/path-that-does-not-exist"));
+    CHECK(kittyin_gamepads_attach_fd(
+        &gamepads, 0u, descriptors[0], "Overflow Pad", 2u, 2u));
+    descriptors[0] = -1;
+    CHECK(kittyin_gamepads_next(&gamepads, &event));
+    CHECK(event.kind == KITTYIN_GAMEPAD_CONNECTED);
+
+    source.type = JS_EVENT_BUTTON;
+    source.number = 0u;
+    for (index = 0u; index < KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY; ++index) {
+        source.value = (int16_t)(index & 1u);
+        CHECK(write(descriptors[1], &source, sizeof source) ==
+              (ssize_t)sizeof source);
+    }
+    CHECK(close(descriptors[1]) == 0);
+    descriptors[1] = -1;
+    kittyin_gamepads_poll(&gamepads, 0);
+
+    for (index = 0u; index < KITTYIN_GAMEPAD_EVENT_QUEUE_CAPACITY; ++index)
+        CHECK(kittyin_gamepads_next(&gamepads, &event));
+    CHECK(event.kind == KITTYIN_GAMEPAD_DISCONNECTED);
+    CHECK(!kittyin_gamepads_next(&gamepads, &event));
+    CHECK(kittyin_gamepads_dropped_events(&gamepads) == 1u);
     kittyin_gamepads_close(&gamepads);
 #endif
     return true;
@@ -506,13 +710,17 @@ int main(void)
         bool (*run)(void);
     } tests[] = {
         {"wire order and fragmentation", test_wire_order_and_fragmentation},
+        {"bulk/fragment equivalence", test_bulk_and_fragmented_equivalence},
         {"mouse matrix", test_mouse_matrix},
         {"paste chunking", test_paste_chunking_and_marker_prefix},
         {"filtering and recovery", test_filtering_malformed_and_recovery},
+        {"control-string isolation", test_control_string_isolation_and_resynchronization},
         {"held state and escape", test_held_state_escape_and_external_binding},
         {"queue overflow", test_queue_overflow},
         {"semantic actions", test_semantic_actions},
+        {"action repeat bounds", test_action_repeat_bounds_and_source_attribution},
         {"gamepad lifecycle", test_gamepad_lifecycle},
+        {"disconnect overflow", test_gamepad_disconnect_survives_overflow},
         {"POSIX lifecycle", test_posix_lifecycle}
     };
     size_t index;

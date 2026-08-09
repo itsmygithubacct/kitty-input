@@ -19,7 +19,7 @@ extern "C" {
 
 #define KITTYIN_VERSION_MAJOR 0
 #define KITTYIN_VERSION_MINOR 2
-#define KITTYIN_VERSION_PATCH 0
+#define KITTYIN_VERSION_PATCH 1
 
 #define KITTYIN_EVENT_QUEUE_CAPACITY 128u
 #define KITTYIN_SEQUENCE_CAPACITY 256u
@@ -202,6 +202,8 @@ const kittyin_stats *kittyin_input_get_stats(const kittyin_input *input);
 /*
  * Semantic action mapping. Keyboard repeat events pass through unchanged.
  * Gamepad buttons and axes use advance() for deterministic held repeat.
+ * Output functions return at most capacity stored events; state transitions
+ * still occur after the output buffer fills or when capacity is zero.
  */
 void kittyin_action_map_init(kittyin_action_map *map);
 bool kittyin_action_map_bind_key(kittyin_action_map *map, uint16_t action,
@@ -232,6 +234,7 @@ size_t kittyin_action_map_gamepad(kittyin_action_map *map,
                                   const kittyin_gamepad_event *gamepad,
                                   kittyin_action_event *events,
                                   size_t capacity);
+/* Coalesces missed intervals and emits at most one repeat per held action. */
 size_t kittyin_action_map_advance(kittyin_action_map *map,
                                   uint32_t elapsed_ms,
                                   kittyin_action_event *events,

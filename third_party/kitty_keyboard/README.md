@@ -128,6 +128,10 @@ the same event model.
 The input and terminal objects are intended to be owned by one input thread.
 Queue overflow drops queued events but continues updating held state; counters
 returned by `kittykb_input_get_stats()` expose all drops and malformed input.
+Malformed overlong CSI input recovers on a final byte, a fresh Escape, or the
+standard CAN/SUB cancellation controls. CAN/SUB also abort filtered control
+strings. OSC accepts BEL or ST termination; other filtered control strings
+require ST, including after a false ESC prefix.
 
 ## Install
 
@@ -140,7 +144,8 @@ compile `src/kitty_keyboard.c` and `src/kitty_keyboard_posix.c` directly. The
 library has no dependencies beyond the C and POSIX system libraries. PTY tests
 use `libutil`; applications do not.
 
-The API is pre-1.0 and may change between minor releases.
+The API is versioned as `0.1.1` through `KITTYKB_VERSION_*`. It is pre-1.0 and
+may change between minor releases.
 
 ## License
 

@@ -275,6 +275,36 @@ test_responses_and_control_strings_are_filtered(void)
 }
 
 static bool
+test_control_string_terminators_are_isolated(void)
+{
+    static const unsigned char bytes[] = {
+        0x1bu, 'P', 'd', 'c', 's', 0x07u, 'n', 'o', 't', '-', 't', 'e', 'x', 't',
+        0x1bu, '\\',
+        0x1bu, ']', 'o', 's', 'c', 0x9cu,
+        0x1bu, ']', 'o', 's', 'c', 0x1bu, 0x07u,
+        0x1bu, 'X', 's', 'o', 's', 0x07u, 's', 't', 'i', 'l', 'l', '-', 'h', 'i', 'd', 'd', 'e', 'n',
+        0x1bu, '\\',
+        0x1bu, 'P', 'c', 'a', 'n', 0x18u, 'r',
+        0x1bu, ']', 's', 'u', 'b', 0x1bu, 0x1au, 's',
+        'q'
+    };
+    kittykb_input input;
+    kittykb_event event;
+
+    kittykb_input_init(&input);
+    kittykb_input_feed(&input, bytes, sizeof(bytes));
+    CHECK(next_event(&input, &event));
+    CHECK(event.key == (uint32_t)'r');
+    CHECK(next_event(&input, &event));
+    CHECK(event.key == (uint32_t)'s');
+    CHECK(next_event(&input, &event));
+    CHECK(event.key == (uint32_t)'q');
+    CHECK(!kittykb_input_next(&input, &event));
+    CHECK(kittykb_input_get_stats(&input)->ignored_sequences == 6u);
+    return true;
+}
+
+static bool
 test_capability_detection_order(void)
 {
     kittykb_input input;
@@ -342,6 +372,20 @@ test_overlong_sequence_recovers(void)
     CHECK(event.key == (uint32_t)'q');
     CHECK(!kittykb_input_next(&input, &event));
     CHECK(kittykb_input_get_stats(&input)->malformed_sequences == 1u);
+
+    /* CAN and SUB are standard sequence-cancellation controls and must also
+     * leave discard mode ready for the following key. */
+    kittykb_input_init(&input);
+    kittykb_input_feed(&input, "\x1b[", 2u);
+    for (index = 0u; index < KITTYKB_SEQUENCE_CAPACITY + 20u; ++index) {
+        kittykb_input_feed(&input, &byte, 1u);
+    }
+    byte = 0x18;
+    kittykb_input_feed(&input, &byte, 1u);
+    kittykb_input_feed(&input, "q", 1u);
+    CHECK(next_event(&input, &event));
+    CHECK(event.key == (uint32_t)'q');
+    CHECK(!kittykb_input_next(&input, &event));
     return true;
 }
 
@@ -517,6 +561,7 @@ main(void)
         {"legacy functional key matrix", test_legacy_functional_matrix},
         {"legacy UTF-8, Alt, and Escape", test_legacy_utf8_alt_and_escape},
         {"terminal responses are filtered", test_responses_and_control_strings_are_filtered},
+        {"control-string terminators", test_control_string_terminators_are_isolated},
         {"capability detection order", test_capability_detection_order},
         {"base-layout held alias", test_base_layout_held_alias},
         {"insufficient flags reject held state", test_insufficient_flags_never_claim_held_state},
