@@ -543,6 +543,77 @@ test_posix_terminal_lifecycle(void)
     return true;
 }
 
+static bool
+test_posix_read_backpressure(void)
+{
+    enum { BURST_SIZE = 16384 };
+    static unsigned char burst[BURST_SIZE];
+    kittykb_terminal terminal;
+    kittykb_terminal_options options;
+    kittykb_event event;
+    size_t written = 0u;
+    size_t decoded = 0u;
+    int master = -1;
+    int slave = -1;
+    int master_flags;
+    int idle = 0;
+
+    (void)memset(burst, 'a', sizeof(burst));
+    CHECK(openpty(&master, &slave, NULL, NULL, NULL) == 0);
+    master_flags = fcntl(master, F_GETFL);
+    CHECK(master_flags >= 0);
+    CHECK(fcntl(master, F_SETFL, master_flags | O_NONBLOCK) == 0);
+    kittykb_terminal_init(&terminal);
+    kittykb_terminal_options_init(&options);
+    options.probe_timeout_ms = 0;
+    CHECK(kittykb_terminal_start(&terminal, slave, slave, &options) == 0);
+
+    /* Every burst byte decodes to one event, far beyond the queue
+     * capacity.  Bytes the queue cannot hold must wait in the kernel
+     * buffer for a later read call instead of being dropped. */
+    while (decoded < (size_t)BURST_SIZE && idle < 400) {
+        bool progressed = false;
+
+        while (written < (size_t)BURST_SIZE) {
+            const ssize_t result = write(
+                master,
+                burst + written,
+                (size_t)BURST_SIZE - written);
+
+            if (result > 0) {
+                written += (size_t)result;
+                progressed = true;
+                continue;
+            }
+            if (result < 0 && errno == EINTR) {
+                continue;
+            }
+            CHECK(result < 0 &&
+                  (errno == EAGAIN || errno == EWOULDBLOCK));
+            break;
+        }
+        CHECK(kittykb_terminal_read(&terminal) >= 0);
+        while (kittykb_input_next(&terminal.input, &event)) {
+            CHECK(event.key == (uint32_t)'a');
+            ++decoded;
+            progressed = true;
+        }
+        if (progressed) {
+            idle = 0;
+        } else {
+            ++idle;
+            (void)poll(NULL, 0u, 5);
+        }
+    }
+
+    CHECK(decoded == (size_t)BURST_SIZE);
+    CHECK(kittykb_input_get_stats(&terminal.input)->dropped_events == 0u);
+    CHECK(kittykb_terminal_stop(&terminal) == 0);
+    CHECK(close(master) == 0);
+    CHECK(close(slave) == 0);
+    return true;
+}
+
 typedef bool (*test_function)(void);
 
 typedef struct test_case {
@@ -568,7 +639,8 @@ main(void)
         {"overlong sequence recovery", test_overlong_sequence_recovers},
         {"queue overflow preserves state", test_queue_overflow_keeps_state_correct},
         {"functional key names", test_functional_key_names},
-        {"POSIX terminal lifecycle", test_posix_terminal_lifecycle}
+        {"POSIX terminal lifecycle", test_posix_terminal_lifecycle},
+        {"POSIX read backpressure", test_posix_read_backpressure}
     };
     size_t passed = 0u;
     size_t index;

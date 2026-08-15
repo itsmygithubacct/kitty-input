@@ -239,17 +239,28 @@ int kittyin_terminal_read(kittyin_terminal *terminal)
         return -1;
     }
     for (;;) {
-        const ssize_t count = read(terminal->keyboard.input_fd, buffer,
-                                   sizeof buffer);
+        /* One input byte decodes to at most one event, so bounding each
+         * read by the queue space left (minus one slot reserved for the
+         * escape-timeout flush) cannot drop: unread bytes stay in the
+         * kernel buffer and the next call resumes losslessly. */
+        const size_t free_slots = KITTYIN_EVENT_QUEUE_CAPACITY -
+                                  terminal->input.queue_count;
+        size_t limit = sizeof buffer;
+        ssize_t count;
 
+        if (free_slots <= 1u) break;
+        if (limit > free_slots - 1u) limit = free_slots - 1u;
+        count = read(terminal->keyboard.input_fd, buffer, limit);
         if (count > 0) {
             read_any = true;
             kittyin_input_feed(&terminal->input, buffer, (size_t)count);
             if (count > INT_MAX - total) total = INT_MAX;
             else total += (int)count;
-            if (!input_is_immediately_readable(terminal->keyboard.input_fd))
-                break;
-            continue;
+            /* A short read already proves the buffer is drained. */
+            if ((size_t)count == limit &&
+                input_is_immediately_readable(terminal->keyboard.input_fd))
+                continue;
+            break;
         }
         if (count < 0 && errno == EINTR) continue;
         if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK)

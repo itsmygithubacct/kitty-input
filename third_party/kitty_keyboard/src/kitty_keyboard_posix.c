@@ -361,11 +361,22 @@ kittykb_terminal_read(kittykb_terminal *terminal)
     }
 
     for (;;) {
-        const ssize_t count = read(
-            terminal->input_fd,
-            buffer,
-            sizeof(buffer));
+        /* One input byte decodes to at most one event, so bounding each
+         * read by the queue space left (minus one slot reserved for the
+         * escape-timeout flush) cannot drop: unread bytes stay in the
+         * kernel buffer and the next call resumes losslessly. */
+        const size_t free_slots = KITTYKB_EVENT_QUEUE_CAPACITY -
+                                  terminal->input.queue_count;
+        size_t limit = sizeof(buffer);
+        ssize_t count;
 
+        if (free_slots <= 1u) {
+            break;
+        }
+        if (limit > free_slots - 1u) {
+            limit = free_slots - 1u;
+        }
+        count = read(terminal->input_fd, buffer, limit);
         if (count > 0) {
             read_any = true;
             kittykb_input_feed(&terminal->input, buffer, (size_t)count);
@@ -374,10 +385,12 @@ kittykb_terminal_read(kittykb_terminal *terminal)
             } else {
                 total += (int)count;
             }
-            if (!input_is_immediately_readable(terminal->input_fd)) {
-                break;
+            /* A short read already proves the buffer is drained. */
+            if ((size_t)count == limit &&
+                input_is_immediately_readable(terminal->input_fd)) {
+                continue;
             }
-            continue;
+            break;
         }
         if (count < 0 && errno == EINTR) {
             continue;

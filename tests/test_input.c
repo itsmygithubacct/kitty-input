@@ -703,6 +703,133 @@ static bool test_posix_lifecycle(void)
     return true;
 }
 
+static bool test_posix_read_backpressure(void)
+{
+    static const char paste_begin[] = "\x1b[200~";
+    static const char paste_finish[] = "\x1b[201~";
+    enum { PAYLOAD_SIZE = 65536 };
+    static unsigned char message[sizeof paste_begin - 1u + PAYLOAD_SIZE +
+                                 sizeof paste_finish - 1u];
+    static unsigned char recovered[PAYLOAD_SIZE];
+    kittyin_terminal terminal;
+    kittyin_terminal_options options;
+    kittyin_event event;
+    size_t message_length = sizeof paste_begin - 1u;
+    size_t written = 0u;
+    size_t recovered_length = 0u;
+    size_t index;
+    bool final_seen = false;
+    int master = -1;
+    int slave = -1;
+    int master_flags;
+    int idle = 0;
+
+    (void)memcpy(message, paste_begin, sizeof paste_begin - 1u);
+    for (index = 0u; index < (size_t)PAYLOAD_SIZE; ++index)
+        message[message_length++] = (unsigned char)('a' + index % 26u);
+    (void)memcpy(message + message_length, paste_finish,
+                 sizeof paste_finish - 1u);
+    message_length += sizeof paste_finish - 1u;
+
+    CHECK(openpty(&master, &slave, NULL, NULL, NULL) == 0);
+    master_flags = fcntl(master, F_GETFL);
+    CHECK(master_flags >= 0);
+    CHECK(fcntl(master, F_SETFL, master_flags | O_NONBLOCK) == 0);
+    kittyin_terminal_init(&terminal);
+    kittyin_terminal_options_init(&options);
+    options.keyboard.probe_timeout_ms = 0;
+    CHECK(kittyin_terminal_start(&terminal, slave, slave, &options) == 0);
+
+    /* A paste far larger than the event queue must survive being written
+     * faster than the consumer drains: unread bytes wait in the kernel
+     * buffer until a later read call has queue space for them. */
+    while (!final_seen && idle < 400) {
+        bool progressed = false;
+
+        while (written < message_length) {
+            const ssize_t result = write(master, message + written,
+                                         message_length - written);
+
+            if (result > 0) {
+                written += (size_t)result;
+                progressed = true;
+                continue;
+            }
+            if (result < 0 && errno == EINTR) continue;
+            CHECK(result < 0 &&
+                  (errno == EAGAIN || errno == EWOULDBLOCK));
+            break;
+        }
+        CHECK(kittyin_terminal_read(&terminal) >= 0);
+        while (kittyin_input_next(&terminal.input, &event)) {
+            CHECK(event.kind == KITTYIN_EVENT_PASTE);
+            CHECK(!final_seen);
+            CHECK(event.data.paste.length <=
+                  (size_t)PAYLOAD_SIZE - recovered_length);
+            (void)memcpy(recovered + recovered_length,
+                         event.data.paste.bytes, event.data.paste.length);
+            recovered_length += event.data.paste.length;
+            if (event.data.paste.final) final_seen = true;
+            progressed = true;
+        }
+        if (progressed) idle = 0;
+        else {
+            ++idle;
+            (void)poll(NULL, 0u, 5);
+        }
+    }
+
+    CHECK(final_seen);
+    CHECK(recovered_length == (size_t)PAYLOAD_SIZE);
+    CHECK(memcmp(recovered, message + sizeof paste_begin - 1u,
+                 PAYLOAD_SIZE) == 0);
+    CHECK(kittyin_input_get_stats(&terminal.input)->dropped_events == 0u);
+
+    /* A key burst is denser than paste: every byte decodes to an event,
+     * so a single uncapped read pass would overflow the queue by two
+     * orders of magnitude. */
+    written = 0u;
+    recovered_length = 0u;
+    idle = 0;
+    (void)memset(message, 'a', (size_t)PAYLOAD_SIZE);
+    while (recovered_length < (size_t)PAYLOAD_SIZE && idle < 400) {
+        bool progressed = false;
+
+        while (written < (size_t)PAYLOAD_SIZE) {
+            const ssize_t result = write(master, message + written,
+                                         (size_t)PAYLOAD_SIZE - written);
+
+            if (result > 0) {
+                written += (size_t)result;
+                progressed = true;
+                continue;
+            }
+            if (result < 0 && errno == EINTR) continue;
+            CHECK(result < 0 &&
+                  (errno == EAGAIN || errno == EWOULDBLOCK));
+            break;
+        }
+        CHECK(kittyin_terminal_read(&terminal) >= 0);
+        while (kittyin_input_next(&terminal.input, &event)) {
+            CHECK(event.kind == KITTYIN_EVENT_KEY);
+            CHECK(event.data.key.key == (uint32_t)'a');
+            ++recovered_length;
+            progressed = true;
+        }
+        if (progressed) idle = 0;
+        else {
+            ++idle;
+            (void)poll(NULL, 0u, 5);
+        }
+    }
+    CHECK(recovered_length == (size_t)PAYLOAD_SIZE);
+    CHECK(kittyin_input_get_stats(&terminal.input)->dropped_events == 0u);
+    CHECK(kittyin_terminal_stop(&terminal) == 0);
+    CHECK(close(master) == 0);
+    CHECK(close(slave) == 0);
+    return true;
+}
+
 int main(void)
 {
     static const struct {
@@ -721,7 +848,8 @@ int main(void)
         {"action repeat bounds", test_action_repeat_bounds_and_source_attribution},
         {"gamepad lifecycle", test_gamepad_lifecycle},
         {"disconnect overflow", test_gamepad_disconnect_survives_overflow},
-        {"POSIX lifecycle", test_posix_lifecycle}
+        {"POSIX lifecycle", test_posix_lifecycle},
+        {"read backpressure", test_posix_read_backpressure}
     };
     size_t index;
 
