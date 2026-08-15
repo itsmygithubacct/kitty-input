@@ -21,19 +21,30 @@ static const unsigned char paste_end[] = {0x1bu, '[', '2', '0', '1', '~'};
 
 #define KITTYIN_KEYBOARD_FEED_BATCH_CAPACITY 8u
 
-static void emit_event(kittyin_input *input, const kittyin_event *event)
+/* Reserves the next queue slot, zeroed for in-place construction, or
+ * returns NULL after counting a drop when the queue is full.  Either way
+ * the event counts as decoded. */
+static kittyin_event *emit_slot(kittyin_input *input)
 {
-    size_t tail;
+    kittyin_event *slot;
 
     ++input->stats.events_decoded;
     if (input->queue_count >= KITTYIN_EVENT_QUEUE_CAPACITY) {
         ++input->stats.dropped_events;
-        return;
+        return NULL;
     }
-    tail = (input->queue_head + input->queue_count) %
-           KITTYIN_EVENT_QUEUE_CAPACITY;
-    input->queue[tail] = *event;
+    slot = &input->queue[(input->queue_head + input->queue_count) %
+                         KITTYIN_EVENT_QUEUE_CAPACITY];
     ++input->queue_count;
+    (void)memset(slot, 0, sizeof *slot);
+    return slot;
+}
+
+static void emit_event(kittyin_input *input, const kittyin_event *event)
+{
+    kittyin_event *slot = emit_slot(input);
+
+    if (slot != NULL) *slot = *event;
 }
 
 static void drain_keyboard(kittyin_input *input)
@@ -42,12 +53,11 @@ static void drain_keyboard(kittyin_input *input)
 
     if (input == NULL || input->keyboard == NULL) return;
     while (kittykb_input_next(input->keyboard, &key)) {
-        kittyin_event event;
+        kittyin_event *event = emit_slot(input);
 
-        (void)memset(&event, 0, sizeof event);
-        event.kind = KITTYIN_EVENT_KEY;
-        event.data.key = key;
-        emit_event(input, &event);
+        if (event == NULL) continue;
+        event->kind = KITTYIN_EVENT_KEY;
+        event->data.key = key;
     }
 }
 
@@ -170,27 +180,27 @@ static bool parse_mouse(const char *sequence, size_t length,
 
 static void emit_focus(kittyin_input *input, bool focused)
 {
-    kittyin_event event;
+    kittyin_event *event = emit_slot(input);
 
-    (void)memset(&event, 0, sizeof event);
-    event.kind = KITTYIN_EVENT_FOCUS;
-    event.data.focus.focused = focused;
-    emit_event(input, &event);
+    if (event == NULL) return;
+    event->kind = KITTYIN_EVENT_FOCUS;
+    event->data.focus.focused = focused;
 }
 
 static void emit_paste(kittyin_input *input, bool final)
 {
-    kittyin_event event;
+    kittyin_event *event;
 
     if (input->paste_length == 0u && !final) return;
-    (void)memset(&event, 0, sizeof event);
-    event.kind = KITTYIN_EVENT_PASTE;
-    event.data.paste.length = input->paste_length;
-    event.data.paste.final = final;
-    if (input->paste_length != 0u)
-        (void)memcpy(event.data.paste.bytes, input->paste,
-                     input->paste_length);
-    emit_event(input, &event);
+    event = emit_slot(input);
+    if (event != NULL) {
+        event->kind = KITTYIN_EVENT_PASTE;
+        event->data.paste.length = input->paste_length;
+        event->data.paste.final = final;
+        if (input->paste_length != 0u)
+            (void)memcpy(event->data.paste.bytes, input->paste,
+                         input->paste_length);
+    }
     ++input->stats.paste_chunks;
     input->paste_length = 0u;
 }

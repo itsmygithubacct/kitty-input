@@ -142,21 +142,46 @@ update_held_state(kittykb_input *input, const kittykb_event *event)
     ++input->held_count;
 }
 
-static void
-emit_event(kittykb_input *input, const kittykb_event *event)
+/* Returns the next queue slot, zeroed for in-place construction, or the
+ * caller's zeroed overflow storage when the queue is full.  emit_commit()
+ * settles held-key state and the counters for either outcome. */
+static kittykb_event *
+emit_begin(kittykb_input *input, kittykb_event *overflow)
 {
-    size_t tail;
+    kittykb_event *slot = overflow;
 
+    if (input->queue_count < KITTYKB_EVENT_QUEUE_CAPACITY) {
+        slot = &input->queue[
+            (input->queue_head + input->queue_count) %
+            KITTYKB_EVENT_QUEUE_CAPACITY];
+    }
+    (void)memset(slot, 0, sizeof(*slot));
+    return slot;
+}
+
+static void
+emit_commit(
+    kittykb_input *input,
+    const kittykb_event *event,
+    const kittykb_event *overflow)
+{
     update_held_state(input, event);
     ++input->stats.events_decoded;
-    if (input->queue_count >= KITTYKB_EVENT_QUEUE_CAPACITY) {
+    if (event == overflow) {
         ++input->stats.dropped_events;
         return;
     }
-    tail = (input->queue_head + input->queue_count) %
-           KITTYKB_EVENT_QUEUE_CAPACITY;
-    input->queue[tail] = *event;
     ++input->queue_count;
+}
+
+static void
+emit_event(kittykb_input *input, const kittykb_event *event)
+{
+    kittykb_event overflow;
+    kittykb_event *slot = emit_begin(input, &overflow);
+
+    *slot = *event;
+    emit_commit(input, slot, &overflow);
 }
 
 static void
@@ -168,15 +193,15 @@ emit_simple(
     kittykb_event_source source,
     bool explicit_action)
 {
-    kittykb_event event;
+    kittykb_event overflow;
+    kittykb_event *event = emit_begin(input, &overflow);
 
-    (void)memset(&event, 0, sizeof(event));
-    event.key = key;
-    event.modifiers = modifiers;
-    event.action = action;
-    event.source = (uint8_t)source;
-    event.event_type_explicit = explicit_action;
-    emit_event(input, &event);
+    event->key = key;
+    event->modifiers = modifiers;
+    event->action = action;
+    event->source = (uint8_t)source;
+    event->event_type_explicit = explicit_action;
+    emit_commit(input, event, &overflow);
 }
 
 static bool
@@ -571,18 +596,18 @@ emit_codepoint(
     uint32_t value,
     uint32_t modifiers)
 {
-    kittykb_event event;
+    kittykb_event overflow;
+    kittykb_event *event = emit_begin(input, &overflow);
 
-    (void)memset(&event, 0, sizeof(event));
-    event.key = value;
-    event.modifiers = modifiers;
-    event.action = KITTYKB_ACTION_PRESS;
-    event.source = (uint8_t)KITTYKB_SOURCE_LEGACY;
+    event->key = value;
+    event->modifiers = modifiers;
+    event->action = KITTYKB_ACTION_PRESS;
+    event->source = (uint8_t)KITTYKB_SOURCE_LEGACY;
     if (is_allowed_text_codepoint(value)) {
-        event.text[0] = value;
-        event.text_length = 1u;
+        event->text[0] = value;
+        event->text_length = 1u;
     }
-    emit_event(input, &event);
+    emit_commit(input, event, &overflow);
 }
 
 static void
