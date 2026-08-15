@@ -12,6 +12,8 @@
 typedef uint64_t (*benchmark_function)(size_t iterations);
 
 static volatile uint64_t benchmark_sink;
+static bool assert_budgets;
+static bool budget_exceeded;
 
 static uint64_t nanoseconds(void)
 {
@@ -207,9 +209,11 @@ static void sort_samples(uint64_t *samples)
 }
 
 static void run_benchmark(const char *name, benchmark_function function,
-                          size_t iterations, size_t units_per_iteration)
+                          size_t iterations, size_t units_per_iteration,
+                          double budget_ns)
 {
     uint64_t samples[SAMPLE_COUNT];
+    double median;
     size_t sample;
 
     for (sample = 0u; sample < SAMPLE_COUNT; ++sample) {
@@ -221,37 +225,57 @@ static void run_benchmark(const char *name, benchmark_function function,
         samples[sample] = end - begin;
     }
     sort_samples(samples);
-    (void)printf("%-24s %10.2f ns/unit\n", name,
-                 (double)samples[SAMPLE_COUNT / 2u] /
-                 ((double)iterations * (double)units_per_iteration));
+    median = (double)samples[SAMPLE_COUNT / 2u] /
+             ((double)iterations * (double)units_per_iteration);
+    (void)printf("%-24s %10.2f ns/unit\n", name, median);
+
+    /* Budgets are deliberately far above recorded medians: they must
+     * tolerate host-to-host variance and background load while still
+     * failing on algorithmic cliffs, which are orders of magnitude. */
+    if (assert_budgets && median > budget_ns) {
+        (void)fprintf(stderr,
+                      "budget exceeded: %s %.2f > %.2f ns/unit\n",
+                      name, median, budget_ns);
+        budget_exceeded = true;
+    }
 }
 
 static void run_parser_benchmarks(void)
 {
     run_benchmark("ASCII bulk", benchmark_ascii_bulk, 20000u,
-                  KITTYKB_EVENT_QUEUE_CAPACITY);
+                  KITTYKB_EVENT_QUEUE_CAPACITY, 800.0);
     run_benchmark("ASCII fragmented", benchmark_ascii_fragmented,
-                  1000000u, 1u);
-    run_benchmark("mixed wire", benchmark_mixed_wire, 200000u, 1u);
-    run_benchmark("paste", benchmark_paste, 20000u, 4096u);
+                  1000000u, 1u, 1000.0);
+    run_benchmark("mixed wire", benchmark_mixed_wire, 200000u, 1u,
+                  6000.0);
+    run_benchmark("paste", benchmark_paste, 20000u, 4096u, 10.0);
 }
 
 int main(int argc, char **argv)
 {
-    const bool actions_only =
-        argc > 1 && strcmp(argv[1], "actions") == 0;
+    bool actions_only = false;
+    bool parser_only = false;
+    int argument;
 
+    for (argument = 1; argument < argc; ++argument) {
+        if (strcmp(argv[argument], "actions") == 0)
+            actions_only = true;
+        else if (strcmp(argv[argument], "parser") == 0)
+            parser_only = true;
+        else if (strcmp(argv[argument], "--assert") == 0)
+            assert_budgets = true;
+    }
     if (!actions_only) run_parser_benchmarks();
-    if (argc > 1 && strcmp(argv[1], "parser") == 0) {
+    if (parser_only) {
         (void)printf("checksum: %" PRIu64 "\n", benchmark_sink);
-        return 0;
+        return budget_exceeded ? 1 : 0;
     }
     run_benchmark("key map (96 bindings)", benchmark_key_map,
-                  2000000u, 1u);
+                  2000000u, 1u, 5000.0);
     run_benchmark("gamepad (96 bindings)", benchmark_gamepad_map,
-                  2000000u, 1u);
+                  2000000u, 1u, 2000.0);
     run_benchmark("maximum repeat step", benchmark_maximum_advance,
-                  1u, 1u);
+                  1u, 1u, 10000.0);
     (void)printf("checksum: %" PRIu64 "\n", benchmark_sink);
-    return 0;
+    return budget_exceeded ? 1 : 0;
 }

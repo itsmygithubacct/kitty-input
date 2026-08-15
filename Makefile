@@ -84,8 +84,10 @@ fuzz: $(FUZZ_BIN)
 		-dict=tests/kitty_input.dict -max_len=4096 \
 		-max_total_time=$(FUZZ_TIME) -print_final_stats=1 -verbosity=0
 
-test: $(TEST_BIN)
+test: $(TEST_BIN) $(BENCHMARK_BIN)
 	$(TEST_BIN)
+	$(MAKE) keyboard-test
+	$(BENCHMARK_BIN) --assert
 
 keyboard-all:
 	$(MAKE) -C $(KITTY_KEYBOARD_DIR) all
