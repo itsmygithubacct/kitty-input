@@ -29,10 +29,10 @@ all: $(STATIC_LIB) $(SHARED_LIB) $(EXAMPLE_BIN)
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(BUILD_DIR)/kitty_keyboard.o: src/kitty_keyboard.c include/kitty_keyboard.h | $(BUILD_DIR)
+$(BUILD_DIR)/kitty_keyboard.o: src/kitty_keyboard.c include/kitty_keyboard.h include/kitty_keyboard_internal.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/kitty_keyboard_posix.o: src/kitty_keyboard_posix.c include/kitty_keyboard.h include/kitty_keyboard_posix.h | $(BUILD_DIR)
+$(BUILD_DIR)/kitty_keyboard_posix.o: src/kitty_keyboard_posix.c include/kitty_keyboard.h include/kitty_keyboard_posix.h include/kitty_keyboard_posix_internal.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(STATIC_LIB): $(LIB_OBJS)

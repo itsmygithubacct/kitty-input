@@ -40,16 +40,16 @@ all: $(STATIC_LIB) $(SHARED_LIB) $(EXAMPLE_BIN)
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(BUILD_DIR)/kitty_input.o: src/kitty_input.c include/kitty_input.h | $(BUILD_DIR)
+$(BUILD_DIR)/kitty_input.o: src/kitty_input.c include/kitty_input.h $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_internal.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/kitty_input_posix.o: src/kitty_input_posix.c include/kitty_input.h include/kitty_input_posix.h | $(BUILD_DIR)
+$(BUILD_DIR)/kitty_input_posix.o: src/kitty_input_posix.c include/kitty_input.h include/kitty_input_posix.h $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_posix_internal.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/kitty_keyboard.o: $(KITTY_KEYBOARD_DIR)/src/kitty_keyboard.c $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h | $(BUILD_DIR)
+$(BUILD_DIR)/kitty_keyboard.o: $(KITTY_KEYBOARD_DIR)/src/kitty_keyboard.c $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_internal.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/kitty_keyboard_posix.o: $(KITTY_KEYBOARD_DIR)/src/kitty_keyboard_posix.c $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_posix.h | $(BUILD_DIR)
+$(BUILD_DIR)/kitty_keyboard_posix.o: $(KITTY_KEYBOARD_DIR)/src/kitty_keyboard_posix.c $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_posix.h $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_posix_internal.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(STATIC_LIB): $(LIB_OBJS)
@@ -72,7 +72,8 @@ benchmark: $(BENCHMARK_BIN)
 
 $(FUZZ_BIN): tests/fuzz_input.c src/kitty_input.c include/kitty_input.h \
 		$(KITTY_KEYBOARD_DIR)/src/kitty_keyboard.c \
-		$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h | $(BUILD_DIR)
+		$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h \
+		$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_internal.h | $(BUILD_DIR)
 	$(FUZZ_CC) $(CPPFLAGS) -std=c11 -O1 -g3 $(WARNINGS) \
 		-fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined \
 		tests/fuzz_input.c src/kitty_input.c \

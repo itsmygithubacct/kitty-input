@@ -1,5 +1,7 @@
 #include "kitty_input.h"
 
+#include "kitty_keyboard_internal.h"
+
 #include <limits.h>
 #include <string.h>
 
@@ -96,26 +98,6 @@ const kittykb_input *kittyin_input_keyboard_const(const kittyin_input *input)
 void kittyin_input_set_pixel_coordinates(kittyin_input *input, bool enabled)
 {
     if (input != NULL) input->pixel_coordinates = enabled;
-}
-
-static bool parse_decimal(const char *text, size_t begin, size_t end,
-                          uint32_t *value)
-{
-    uint32_t result = 0u;
-    size_t index;
-
-    if (text == NULL || value == NULL || begin >= end) return false;
-    for (index = begin; index < end; ++index) {
-        const unsigned char character = (unsigned char)text[index];
-        const uint32_t digit = (uint32_t)(character - (unsigned char)'0');
-
-        if (character < (unsigned char)'0' ||
-            character > (unsigned char)'9' ||
-            result > (UINT32_MAX - digit) / 10u) return false;
-        result = result * 10u + digit;
-    }
-    *value = result;
-    return true;
 }
 
 static bool parse_mouse(const char *sequence, size_t length,
@@ -338,11 +320,6 @@ static void finish_control_string(kittyin_input *input)
 static bool is_csi_final(unsigned char byte)
 {
     return byte >= 0x40u && byte <= 0x7eu;
-}
-
-static bool cancels_sequence(unsigned char byte)
-{
-    return byte == 0x18u || byte == 0x1au;
 }
 
 void kittyin_input_feed(kittyin_input *input, const void *bytes,

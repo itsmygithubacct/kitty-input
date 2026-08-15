@@ -1,5 +1,7 @@
 #include "kitty_keyboard.h"
 
+#include "kitty_keyboard_internal.h"
+
 #include <limits.h>
 #include <string.h>
 
@@ -17,12 +19,6 @@ enum string_kind {
     STRING_OTHER = 0,
     STRING_OSC = 1
 };
-
-static bool
-cancels_sequence(unsigned char byte)
-{
-    return byte == 0x18u || byte == 0x1au;
-}
 
 static bool
 is_unicode_scalar(uint32_t value)
@@ -46,34 +42,6 @@ canonical_key(uint32_t key)
     default:
         return key;
     }
-}
-
-static bool
-parse_decimal(
-    const char *text,
-    size_t begin,
-    size_t end,
-    uint32_t *value)
-{
-    uint32_t result = 0u;
-    size_t index;
-
-    if (text == NULL || value == NULL || begin >= end) {
-        return false;
-    }
-    for (index = begin; index < end; ++index) {
-        const unsigned char character = (unsigned char)text[index];
-        const uint32_t digit = (uint32_t)(character - (unsigned char)'0');
-
-        if (character < (unsigned char)'0' ||
-            character > (unsigned char)'9' ||
-            result > (UINT32_MAX - digit) / 10u) {
-            return false;
-        }
-        result = result * 10u + digit;
-    }
-    *value = result;
-    return true;
 }
 
 static bool
