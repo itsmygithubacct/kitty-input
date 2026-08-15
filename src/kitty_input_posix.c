@@ -496,22 +496,32 @@ static void read_gamepad(kittyin_gamepads *gamepads, uint8_t gamepad)
     kittyin_gamepad_device *device = &gamepads->devices[gamepad];
 
     while (device->connected) {
-        struct js_event source;
-        ssize_t count = read(device->fd, &source, sizeof source);
+        struct js_event source[32];
+        ssize_t count = read(device->fd, source, sizeof source);
 
-        if (count == (ssize_t)sizeof source) {
-            const unsigned int type =
-                (unsigned int)source.type &
-                (unsigned int)~JS_EVENT_INIT;
-            kittyin_gamepad_event event = {
-                type == JS_EVENT_BUTTON ?
-                    KITTYIN_GAMEPAD_BUTTON : KITTYIN_GAMEPAD_AXIS,
-                gamepad, source.number, source.value,
-                ((unsigned int)source.type & JS_EVENT_INIT) != 0u
-            };
+        /* joydev returns as many whole records as fit in the buffer.
+         * Anything that is not a positive multiple of the record size
+         * (end of stream, torn record, other errors) detaches. */
+        if (count > 0 &&
+            count % (ssize_t)sizeof source[0] == 0) {
+            const size_t records = (size_t)count / sizeof source[0];
+            size_t record;
 
-            if (type == JS_EVENT_BUTTON || type == JS_EVENT_AXIS)
-                emit_gamepad_event(gamepads, &event);
+            for (record = 0u; record < records; ++record) {
+                const unsigned int type =
+                    (unsigned int)source[record].type &
+                    (unsigned int)~JS_EVENT_INIT;
+                kittyin_gamepad_event event = {
+                    type == JS_EVENT_BUTTON ?
+                        KITTYIN_GAMEPAD_BUTTON : KITTYIN_GAMEPAD_AXIS,
+                    gamepad, source[record].number, source[record].value,
+                    ((unsigned int)source[record].type &
+                     JS_EVENT_INIT) != 0u
+                };
+
+                if (type == JS_EVENT_BUTTON || type == JS_EVENT_AXIS)
+                    emit_gamepad_event(gamepads, &event);
+            }
             continue;
         }
         if (count < 0 && errno == EINTR) continue;
