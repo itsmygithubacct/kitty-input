@@ -88,6 +88,104 @@ static bool test_wire_order_and_fragmentation(void)
     return true;
 }
 
+static bool test_focus_loss_releases_keys_in_wire_order(void)
+{
+    static const char held[] = "\x1b[97u";
+    static const char wire[] = "\x1b[O\x1b[I\x1b[100u";
+    kittyin_input input;
+    kittyin_event event;
+    size_t split;
+
+    /* Every two-part split includes the bulk case at either endpoint.
+     * The final iteration feeds one byte at a time. */
+    for (split = 0u; split <= sizeof wire; ++split) {
+        kittyin_input_init(&input);
+        kittykb_input_set_terminal_flags(kittyin_input_keyboard(&input),
+                                         KITTYKB_FLAGS_KEY_STATE);
+        kittyin_input_feed(&input, held, sizeof held - 1u);
+        CHECK(kittyin_input_key_down(&input, (uint32_t)'a'));
+        if (split == sizeof wire) {
+            feed_fragmented(&input, wire, sizeof wire - 1u);
+        } else {
+            kittyin_input_feed(&input, wire, split);
+            kittyin_input_feed(&input, wire + split,
+                               sizeof wire - 1u - split);
+        }
+        CHECK(!kittyin_input_key_down(&input, (uint32_t)'a'));
+        CHECK(kittyin_input_key_down(&input, (uint32_t)'d'));
+        CHECK(kittyin_input_held_count(&input) == 1u);
+        CHECK(next_event(&input, &event, KITTYIN_EVENT_KEY));
+        CHECK(event.data.key.key == (uint32_t)'a');
+        CHECK(event.data.key.action == KITTYKB_ACTION_PRESS);
+        CHECK(next_event(&input, &event, KITTYIN_EVENT_FOCUS));
+        CHECK(!event.data.focus.focused);
+        CHECK(next_event(&input, &event, KITTYIN_EVENT_FOCUS));
+        CHECK(event.data.focus.focused);
+        CHECK(next_event(&input, &event, KITTYIN_EVENT_KEY));
+        CHECK(event.data.key.key == (uint32_t)'d');
+        CHECK(event.data.key.action == KITTYKB_ACTION_PRESS);
+        CHECK(!kittyin_input_next(&input, &event));
+        CHECK(kittyin_input_key_down(&input, (uint32_t)'d'));
+        CHECK(kittyin_input_get_stats(&input)->events_decoded == 4u);
+        CHECK(kittyin_input_get_stats(&input)->dropped_events == 0u);
+    }
+    return true;
+}
+
+static bool test_focus_loss_releases_keys_when_queue_is_full(void)
+{
+    static const char held[] = "\x1b[119u";
+    static const char refocus[] = "\x1b[I\x1b[100u";
+    kittyin_input input;
+    kittyin_event event;
+    size_t index;
+
+    kittyin_input_init(&input);
+    kittykb_input_set_terminal_flags(kittyin_input_keyboard(&input),
+                                     KITTYKB_FLAGS_KEY_STATE);
+    kittyin_input_feed(&input, held, sizeof held - 1u);
+    for (index = 1u; index < KITTYIN_EVENT_QUEUE_CAPACITY; ++index)
+        kittyin_input_feed(&input, "x", 1u);
+    CHECK(kittyin_input_key_down(&input, (uint32_t)'w'));
+    kittyin_input_feed(&input, "\x1b[O", 3u);
+    CHECK(kittyin_input_held_count(&input) == 0u);
+    CHECK(kittyin_input_get_stats(&input)->events_decoded ==
+          KITTYIN_EVENT_QUEUE_CAPACITY + 1u);
+    CHECK(kittyin_input_get_stats(&input)->dropped_events == 1u);
+    for (index = 0u; index < KITTYIN_EVENT_QUEUE_CAPACITY; ++index)
+        CHECK(next_event(&input, &event, KITTYIN_EVENT_KEY));
+    CHECK(!kittyin_input_next(&input, &event));
+    kittyin_input_feed(&input, refocus, sizeof refocus - 1u);
+    CHECK(kittyin_input_key_down(&input, (uint32_t)'d'));
+    CHECK(kittyin_input_held_count(&input) == 1u);
+    CHECK(kittyin_input_get_stats(&input)->dropped_events == 1u);
+    return true;
+}
+
+static bool test_focus_state_with_external_keyboard_and_paste(void)
+{
+    static const char held[] = "\x1b[119u";
+    static const char pasted_focus[] = "\x1b[200~\x1b[O\x1b[201~";
+    kittyin_input input;
+    kittykb_input keyboard;
+
+    kittyin_input_init(&input);
+    kittykb_input_init(&keyboard);
+    kittykb_input_set_terminal_flags(&keyboard, KITTYKB_FLAGS_KEY_STATE);
+    kittyin_input_bind_keyboard(&input, &keyboard);
+    kittyin_input_feed(&input, held, sizeof held - 1u);
+    CHECK(kittykb_input_key_down(&keyboard, (uint32_t)'w'));
+    kittyin_input_feed(&input, "\x1b[I", 3u);
+    CHECK(kittykb_input_key_down(&keyboard, (uint32_t)'w'));
+    feed_fragmented(&input, pasted_focus, sizeof pasted_focus - 1u);
+    CHECK(kittykb_input_key_down(&keyboard, (uint32_t)'w'));
+    feed_fragmented(&input, "\x1b[O", 3u);
+    CHECK(!kittykb_input_key_down(&keyboard, (uint32_t)'w'));
+    CHECK(kittyin_input_held_count(&input) == 0u);
+    CHECK(kittykb_input_terminal_flags(&keyboard) == KITTYKB_FLAGS_KEY_STATE);
+    return true;
+}
+
 static bool test_bulk_and_fragmented_equivalence(void)
 {
     static const unsigned char wire[] = {
@@ -710,6 +808,9 @@ int main(void)
         bool (*run)(void);
     } tests[] = {
         {"wire order and fragmentation", test_wire_order_and_fragmentation},
+        {"focus loss wire order", test_focus_loss_releases_keys_in_wire_order},
+        {"focus loss with full queue", test_focus_loss_releases_keys_when_queue_is_full},
+        {"focus with external keyboard and paste", test_focus_state_with_external_keyboard_and_paste},
         {"bulk/fragment equivalence", test_bulk_and_fragmented_equivalence},
         {"mouse matrix", test_mouse_matrix},
         {"paste chunking", test_paste_chunking_and_marker_prefix},
