@@ -24,6 +24,11 @@ The same allocation-free API also provides:
   including connect and disconnect events. Other POSIX targets retain the
   portable action mapper and a no-device gamepad backend.
 
+Focus loss does not synthesize key-release events or reset an application
+action map. Consumers still update their own action/UI state in event order.
+Do not clear the parser's keyboard state again while dequeuing focus loss: the
+parser may already have decoded a later focus-in and key press in that feed.
+
 ## Build and test
 
 ```sh
@@ -143,6 +148,8 @@ room for their maximum simultaneously matching actions.
 - OSC/DCS/SOS/PM/APC terminal responses are filtered with BEL/ST-specific
   termination rules and CAN/SUB cancellation
 - held-key state is reported only after release-capable Kitty flags are known
+- focus loss clears keyboard held state at its wire position, even when the
+  focus event cannot be queued; later presses in the same feed remain held
 - safe reuse with an externally owned `kittykb_input`
 
 The public API is versioned as `0.2.1` through `KITTYIN_VERSION_*`. The bundled

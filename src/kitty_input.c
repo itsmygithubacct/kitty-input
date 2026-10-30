@@ -162,7 +162,12 @@ static bool parse_mouse(const char *sequence, size_t length,
 
 static void emit_focus(kittyin_input *input, bool focused)
 {
-    kittyin_event *event = emit_slot(input);
+    kittyin_event *event;
+
+    /* Clear at this wire position, even if the focus event is dropped.
+     * A later focus-in and key press in the same feed must survive. */
+    if (!focused) kittyin_input_release_all(input);
+    event = emit_slot(input);
 
     if (event == NULL) return;
     event->kind = KITTYIN_EVENT_FOCUS;
