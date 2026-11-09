@@ -1,152 +1,134 @@
 # kitty-input
 
-`kitty-input` is a small, allocation-free C11 input layer for terminal games
-and applications. It preserves wire order across:
+`kitty-input` is a small, allocation-free C11 library that decodes terminal
+keyboard, mouse, focus and paste input in wire order, and maps keys and gamepads
+to application-defined actions.
 
-- Kitty and legacy keyboard events
-- SGR 1006/1016 mouse press, release, motion, and wheel events
-- terminal focus-in/focus-out events
-- bracketed-paste chunks
+It is not installed on its own. It reaches programs through
+[kitty-terminal-session](https://github.com/itsmygithubacct/kitty-terminal-session#readme),
+which pins it as a submodule; Kilix games and apps compile it into their
+binaries, and those install on demand from the Kilix content catalog.
 
-Keyboard decoding and reliable held-key state come from the bundled
-[`kitty-keyboard`](third_party/kitty_keyboard) component. Its source and
-history live in this repository, and the static and shared libraries bundle
-both layers so consumers link one library.
+## What it does
 
-The same allocation-free API also provides:
+- Decodes Kitty-protocol and legacy keyboard events with press, repeat and
+  release, and tracks every held key independently.
+- Decodes SGR 1006/1016 mouse press, release, motion and wheel events, focus
+  in/out, and bracketed paste in ordered chunks, all in the order they arrived.
+- Filters terminal responses (OSC, DCS, APC and the rest) so they never leak into
+  text input, and accepts input fragmented at any byte boundary.
+- Owns the terminal modes it needs (raw mode, Kitty keyboard flags, mouse
+  tracking, focus reporting, bracketed paste) between an explicit start and stop,
+  with an emergency restore for signal handlers.
+- Maps keys, gamepad buttons and directional axes to consumer-defined actions,
+  with rebinding, dead zones, held-action repeat and active-device tracking.
+- Discovers Linux joysticks (`/dev/input/js0` to `js3`) without blocking,
+  including connect and disconnect.
+- Bundles the [kitty-keyboard](third_party/kitty_keyboard/) decoder; one static
+  or shared library contains both layers.
 
-- consumer-defined semantic actions with keyboard, gamepad-button, and
-  directional-axis bindings;
-- runtime rebinding, active-device tracking, and deterministic held-action
-  repeat;
-- configurable analog dead zones and release-safe controller state; and
-- nonblocking Linux joystick discovery for `/dev/input/js0` through `js3`,
-  including connect and disconnect events. Other POSIX targets retain the
-  portable action mapper and a no-device gamepad backend.
-
-## Build and test
+## Quick start
 
 ```sh
 git clone https://github.com/itsmygithubacct/kitty-input.git
 cd kitty-input
-make test
-make sanitize
-make benchmark
-make fuzz FUZZ_TIME=30
+make            # build/libkitty-input.a, .so and build/events
+make test       # parser tests, keyboard component tests, benchmark assertions
+./build/events  # print decoded events; q exits
 ```
-
-`make` builds `build/libkitty-input.a`, `build/libkitty-input.so`, and the
-`build/events` example. Run the example in a terminal and press `q` to exit.
-
-The imported keyboard component retains its standalone build and PTY test
-suite:
-
-```sh
-make keyboard-all
-make keyboard-test
-make keyboard-sanitize
-```
-
-The benchmark reports median parser and action-map costs. The Clang fuzz
-target differentially checks bulk and byte-fragmented feeds and verifies
-semantic-action state/source invariants under ASan and UBSan; `FUZZ_TIME` is
-the run length in seconds.
-
-## Parser-only use
 
 ```c
+#include "kitty_input.h"
+
 kittyin_input input;
 kittyin_event event;
-
 kittyin_input_init(&input);
 kittyin_input_feed(&input, bytes, byte_count);
 while (kittyin_input_next(&input, &event)) {
-    /* Dispatch event.kind. */
+    /* dispatch event.kind */
 }
 ```
 
-Input may be fragmented at any byte boundary. Mouse and focus-looking bytes
-inside bracketed paste are emitted only as paste data. Paste payloads larger
-than `KITTYIN_PASTE_CHUNK_CAPACITY` are split into ordered chunks; the last
-chunk has `final == true`.
+## Usage
 
-## POSIX lifecycle
+| Area | Main calls |
+|---|---|
+| Parser | `kittyin_input_init`, `kittyin_input_feed`, `kittyin_input_next`, `kittyin_input_key_down`, `kittyin_input_held_count`, `kittyin_input_flush_escape`, `kittyin_input_get_stats` |
+| Terminal lifecycle (`kitty_input_posix.h`) | `kittyin_terminal_options_init`, `kittyin_terminal_init`, `kittyin_terminal_start`, `kittyin_terminal_read`, `kittyin_terminal_stop`, `kittyin_terminal_emergency_restore` |
+| Actions | `kittyin_action_map_init`, `kittyin_action_map_bind_key`, `kittyin_action_map_bind_gamepad_button`, `kittyin_action_map_bind_gamepad_axis`, `kittyin_action_map_key`, `kittyin_action_map_gamepad`, `kittyin_action_map_advance`, `kittyin_action_map_set_repeat`, `kittyin_action_map_set_dead_zone` |
+| Gamepads | `kittyin_gamepads_init`, `kittyin_gamepads_poll`, `kittyin_gamepads_next`, `kittyin_gamepads_attach_fd`, `kittyin_gamepads_close` |
 
-`kittyin_terminal_start()` owns raw mode, nonblocking input, Kitty keyboard
-negotiation, mouse tracking, focus reporting, and bracketed paste until the
-matching `kittyin_terminal_stop()`. Defaults enable button mouse tracking,
-pixel coordinates when supported, focus events, and bracketed paste. Choose
-drag or all-motion reporting with `kittyin_terminal_options.mouse_tracking`.
+| Make target | What it does |
+|---|---|
+| `make` | static and shared libraries plus the `events` example |
+| `make test` | the input tests, the keyboard component's PTY tests, and benchmark assertions |
+| `make sanitize` | the tests under AddressSanitizer and UndefinedBehaviorSanitizer |
+| `make benchmark` | median parser and action-map costs |
+| `make fuzz FUZZ_TIME=30` | Clang libFuzzer differential fuzzing for the given number of seconds |
+| `make keyboard-all`, `make keyboard-test`, `make keyboard-sanitize` | the bundled keyboard component's own build and tests |
 
-The lifecycle is intentionally explicit: start after entering the terminal
-screen that owns the modes, and stop before leaving it. Signal handlers can
-call `kittyin_terminal_emergency_restore()` for a best-effort mode reset.
+## How it works
 
-## Semantic actions and gamepads
-
-Applications choose their own bounded action IDs and may attach more than one
-binding to each:
-
-```c
-kittyin_action_map actions;
-kittyin_action_event mapped[8];
-kittyin_gamepads gamepads;
-kittyin_gamepad_event gamepad;
-size_t count;
-
-kittyin_action_map_init(&actions);
-kittyin_action_map_bind_key(&actions, 0, KITTYKB_KEY_ENTER, 0);
-kittyin_action_map_bind_gamepad_button(
-    &actions, 0, KITTYIN_GAMEPAD_ANY, 0);
-kittyin_action_map_bind_gamepad_axis(
-    &actions, 1, KITTYIN_GAMEPAD_ANY, 1, -1);
-
-kittyin_gamepads_init(&gamepads);
-kittyin_gamepads_poll(&gamepads, now_ms);
-while (kittyin_gamepads_next(&gamepads, &gamepad)) {
-    count = kittyin_action_map_gamepad(
-        &actions, &gamepad, mapped, 8);
-    /* Dispatch mapped[0..count). */
-}
-count = kittyin_action_map_advance(&actions, elapsed_ms, mapped, 8);
-kittyin_gamepads_close(&gamepads);
+```
+ terminal bytes ──▶ kittyin_input_feed ──▶ kitty-keyboard decoder ─┐
+                    (any fragmentation)    SGR mouse, focus, paste ─┼─▶ ordered event queue ──▶ kittyin_input_next
+                                           terminal responses: dropped
+ key / gamepad events ──▶ kittyin_action_map ──▶ action press, repeat, release
 ```
 
-`now_ms` is the caller's monotonic millisecond clock and `elapsed_ms` is the
-time since the previous action update, up to `UINT32_MAX`. Missed repeat
-intervals are coalesced in constant time: each `advance()` call emits at most
-one repeat per held action rather than a catch-up burst.
-`KITTYIN_GAMEPAD_ANY` is intended for single-player mappings. Specific
-controller slots can be bound independently. A disconnect releases every
-action held by that device before active-device selection falls back to
-another connected controller or the keyboard.
+The parser keeps no global state and allocates nothing: queues and paste chunks
+are fixed-size, and overflow is counted rather than allocated. Mouse- or
+focus-looking bytes inside a bracketed paste stay paste data, and held-key state
+is reported only once the terminal has confirmed release-capable Kitty flags.
+The action map turns key and gamepad events into the application's own action
+ids; repeat intervals missed between updates are coalesced, so a slow frame
+produces one repeat rather than a burst, and a disconnected controller releases
+every action it held.
 
-Legacy uppercase letters match their lowercase no-modifier bindings, and raw
-C0 encodings such as byte `0x03` match the equivalent `Ctrl+C` semantic
-binding. Initial Linux joystick snapshots establish no actions; only later
-changes synthesize presses. `kittyin_gamepads_attach_fd()` takes ownership of
-a successful descriptor attachment and makes it nonblocking and close-on-exec.
+Depth: [docs/api.md](docs/api.md).
 
-Action output functions return the number actually stored, never more than
-the supplied capacity. State transitions still occur when capacity is zero or
-exhausted, so applications that must observe every transition should provide
-room for their maximum simultaneously matching actions.
+## Documentation
 
-## Guarantees
+- [docs/api.md](docs/api.md): parser-only use, the POSIX lifecycle, semantic
+  actions and gamepads, and the guarantees and version numbers.
+- [docs/building.md](docs/building.md): build, test, sanitizer, benchmark and
+  fuzz targets.
+- [third_party/kitty_keyboard/README.md](third_party/kitty_keyboard/README.md):
+  the bundled Kitty keyboard protocol decoder.
 
-- no heap allocation or global parser state
-- bounded queues and paste chunks with drop counters
-- disconnect retention under gamepad queue pressure (the oldest queued sample
-  is evicted and counted as dropped)
-- zero-based mouse coordinates
-- malformed SGR mouse packets never leak into text input
-- OSC/DCS/SOS/PM/APC terminal responses are filtered with BEL/ST-specific
-  termination rules and CAN/SUB cancellation
-- held-key state is reported only after release-capable Kitty flags are known
-- safe reuse with an externally owned `kittykb_input`
+## Related repositories
 
-The public API is versioned as `0.2.1` through `KITTYIN_VERSION_*`. The bundled
-keyboard component is versioned as `0.1.1` through `KITTYKB_VERSION_*`.
+- [kitty-terminal-session](https://github.com/itsmygithubacct/kitty-terminal-session#readme)
+  pins this library at `third_party/kitty-input` beside kitty-framebuffer. Every
+  program that pins that session compiles kitty-input in:
+  [kilix-game-sdk](https://github.com/itsmygithubacct/kilix-game-sdk#readme) and
+  the games built on it
+  ([kilix-games](https://github.com/itsmygithubacct/kilix-games#readme),
+  [pleb-tower](https://github.com/itsmygithubacct/pleb-tower#readme),
+  [super-kilix](https://github.com/itsmygithubacct/super-kilix#readme),
+  [pleb-plant-grower](https://github.com/itsmygithubacct/pleb-plant-grower#readme),
+  [kilix-land](https://github.com/itsmygithubacct/kilix-land#readme)), and
+  [kilix-techno](https://github.com/itsmygithubacct/kilix-techno#readme),
+  [kilix-pdf](https://github.com/itsmygithubacct/kilix-pdf#readme),
+  [kilix-playalong](https://github.com/itsmygithubacct/kilix-playalong#readme),
+  [kilix-rtsp](https://github.com/itsmygithubacct/kilix-rtsp#readme),
+  [kilix-sound-detect](https://github.com/itsmygithubacct/kilix-sound-detect#readme)
+  and [kilix-mask](https://github.com/itsmygithubacct/kilix-mask#readme).
+  Several games include `kitty_keyboard.h` from the bundled decoder directly.
+- [kitty-framebuffer](https://github.com/itsmygithubacct/kitty-framebuffer#readme)
+  is the matching presentation library.
+
+## Part of Plebian-OS
+
+kitty-input is one of the repositories behind
+[Plebian-OS](https://github.com/itsmygithubacct/plebian-os#readme), a Debian
+install whose desktop is [Kilix](https://github.com/itsmygithubacct/kilix#readme)
+running the [Kilix 95](https://github.com/itsmygithubacct/kilix-95#readme)
+desktop through [Pleb](https://github.com/itsmygithubacct/pleb#readme).
+It reaches a user compiled, through kitty-terminal-session, into the Kilix games
+and apps that install on demand from the Kilix content catalog. The map of every
+repository and how it ships is on the
+[components page](https://github.com/itsmygithubacct/plebian-os/blob/main/docs/components.md).
 
 ## License
 
