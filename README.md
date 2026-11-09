@@ -7,7 +7,9 @@ to application-defined actions.
 It is not installed on its own. It reaches programs through
 [kitty-terminal-session](https://github.com/itsmygithubacct/kitty-terminal-session#readme),
 which pins it as a submodule; Kilix games and apps compile it into their
-binaries, and those install on demand from the Kilix content catalog.
+binaries. Most of those install on demand, from the Kilix content catalog or the
+first time a Kilix command needs them; the PDF Viewer (kilix-pdf) is installed
+at first boot.
 
 ## What it does
 
@@ -125,9 +127,9 @@ kitty-input is one of the repositories behind
 install whose desktop is [Kilix](https://github.com/itsmygithubacct/kilix#readme)
 running the [Kilix 95](https://github.com/itsmygithubacct/kilix-95#readme)
 desktop through [Pleb](https://github.com/itsmygithubacct/pleb#readme).
-It reaches a user compiled, through kitty-terminal-session, into the Kilix games
-and apps that install on demand from the Kilix content catalog. The map of every
-repository and how it ships is on the
+It reaches a user compiled, through kitty-terminal-session, into Kilix games
+and apps: most install on demand, and the PDF Viewer is installed at first boot.
+The map of every repository and how it ships is on the
 [components page](https://github.com/itsmygithubacct/plebian-os/blob/main/docs/components.md).
 
 ## License
