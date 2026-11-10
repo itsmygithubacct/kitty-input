@@ -89,6 +89,15 @@ every action it held.
 
 Depth: [docs/api.md](docs/api.md).
 
+## Python
+
+[`python/`](python/README.md) is a standard-library port of this parser for
+Python applications, with the same event model and key codes. It is a port
+rather than a binding so that pure-Python applications need no native
+library; `make python-test` runs its unit tests and a differential fuzz that
+feeds the same random wire to the C and Python decoders and compares every
+event.
+
 ## Documentation
 
 - [docs/api.md](docs/api.md): parser-only use, the POSIX lifecycle, semantic

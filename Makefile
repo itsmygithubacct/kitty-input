@@ -33,7 +33,7 @@ FUZZ_BIN := $(BUILD_DIR)/fuzz-input
 DEPS := $(LIB_OBJS:.o=.d)
 
 .PHONY: all benchmark clean fuzz install keyboard-all keyboard-clean \
-	keyboard-sanitize keyboard-test sanitize test
+	keyboard-sanitize keyboard-test python-diff python-test sanitize test
 
 all: $(STATIC_LIB) $(SHARED_LIB) $(EXAMPLE_BIN)
 
@@ -124,3 +124,19 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 -include $(DEPS)
+
+# The Python port (python/). `python-test` runs its unit tests and then the
+# differential fuzz, which feeds the same random wire to both decoders.
+PYTHON ?= python3
+DUMP_BIN := $(BUILD_DIR)/dump-events
+
+$(DUMP_BIN): python/tests/differential/dump_events.c $(STATIC_LIB) | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) -o $@
+
+python-diff: $(DUMP_BIN)
+	cd python && KITTY_INPUT_DUMP=$(abspath $(DUMP_BIN)) PYTHONPATH=src \
+		$(PYTHON) -m unittest tests.test_differential -v
+
+python-test: $(DUMP_BIN)
+	cd python && KITTY_INPUT_DUMP=$(abspath $(DUMP_BIN)) PYTHONPATH=src \
+		$(PYTHON) -m unittest discover -s tests

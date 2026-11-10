@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kitty-input"
+version = "0.2.1"
+description = "Terminal keyboard, mouse, focus and paste decoding: the kitty-input parser for Python"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [{name = "kitty-input contributors"}]
+keywords = ["terminal", "kitty", "keyboard", "mouse", "input", "tui"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Terminals",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/itsmygithubacct/kitty-input/tree/main/python"
+Repository = "https://github.com/itsmygithubacct/kitty-input.git"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kitty_input = ["py.typed"]
